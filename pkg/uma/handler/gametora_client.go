@@ -1,4 +1,4 @@
-package uma
+package handler
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/latoulicious/HKTM/internal/config"
 	"github.com/latoulicious/HKTM/pkg/cron"
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 // Global Gametora client instance
@@ -17,9 +18,9 @@ var globalGametoraClient *GametoraClient
 
 // GametoraClient represents the Gametora API client for stable JSON endpoints
 type GametoraClient struct {
-	baseURL        string
-	httpClient     *http.Client
-	cache          map[string]*CacheEntry
+	baseURL    string
+	httpClient *http.Client
+	// cache          map[string]*CacheEntry
 	cacheMutex     sync.RWMutex
 	cacheTTL       time.Duration
 	buildID        string
@@ -68,7 +69,7 @@ func NewGametoraClient(cfg *config.Config) *GametoraClient {
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
-		cache:    make(map[string]*CacheEntry),
+		// cache:    make(map[string]*CacheEntry),
 		cacheTTL: 30 * time.Minute, // Cache for 30 minutes
 	}
 
@@ -161,24 +162,24 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 }
 
 // SearchSimplifiedSupportCard searches for a support card using the Gametora JSON API and returns simplified structure
-func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *SimplifiedGametoraSearchResult {
+func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.SimplifiedGametoraSearchResult {
 	// Check cache first
-	cacheKey := fmt.Sprintf("gametora_simplified_support_%s", strings.ToLower(query))
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*SimplifiedGametoraSearchResult); ok {
-			return result
-		}
-	}
+	// cacheKey := fmt.Sprintf("gametora_simplified_support_%s", strings.ToLower(query))
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*SimplifiedGametoraSearchResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// Get build ID
 	buildID, err := c.GetBuildID()
 	if err != nil {
-		result := &SimplifiedGametoraSearchResult{
+		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to get build ID: %v", err),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
@@ -186,34 +187,34 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *SimplifiedGa
 	supportsURL := fmt.Sprintf("%s/%s/umamusume/supports.json", c.baseURL, buildID)
 	resp, err := c.httpClient.Get(supportsURL)
 	if err != nil {
-		result := &SimplifiedGametoraSearchResult{
+		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch supports list: %v", err),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		result := &SimplifiedGametoraSearchResult{
+		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("supports API returned status code: %d", resp.StatusCode),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	var supportsResp GametoraSupportsResponse
+	var supportsResp shared.GametoraSupportsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&supportsResp); err != nil {
-		result := &SimplifiedGametoraSearchResult{
+		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode supports response: %v", err),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
@@ -353,11 +354,11 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *SimplifiedGa
 	}
 
 	if len(allMatches) == 0 {
-		result := &SimplifiedGametoraSearchResult{
+		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
@@ -371,9 +372,9 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *SimplifiedGa
 	}
 
 	// Convert all matches to simplified structure
-	var simplifiedCards []*SimplifiedSupportCard
+	var simplifiedCards []*shared.SimplifiedSupportCard
 	for _, match := range allMatches {
-		simplifiedCard := &SimplifiedSupportCard{
+		simplifiedCard := &shared.SimplifiedSupportCard{
 			URLName:     match.URLName,
 			SupportID:   match.SupportID,
 			CharID:      match.CharID,
@@ -396,40 +397,40 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *SimplifiedGa
 		simplifiedCards = append(simplifiedCards, simplifiedCard)
 	}
 
-	result := &SimplifiedGametoraSearchResult{
+	result := &shared.SimplifiedGametoraSearchResult{
 		Found:        true,
 		SupportCard:  simplifiedCards[0], // Best match as primary
 		SupportCards: simplifiedCards,    // All matches
 		Query:        query,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // getFromCache retrieves an item from cache
-func (c *GametoraClient) getFromCache(key string) interface{} {
-	c.cacheMutex.RLock()
-	defer c.cacheMutex.RUnlock()
+// func (c *GametoraClient) getFromCache(key string) interface{} {
+// 	c.cacheMutex.RLock()
+// 	defer c.cacheMutex.RUnlock()
 
-	if entry, exists := c.cache[key]; exists && !entry.IsExpired() {
-		return entry.Data
-	}
+// 	if entry, exists := c.cache[key]; exists && !entry.IsExpired() {
+// 		return entry.Data
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // setCache stores an item in cache
-func (c *GametoraClient) setCache(key string, data interface{}) {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+// func (c *GametoraClient) setCache(key string, data interface{}) {
+// 	c.cacheMutex.Lock()
+// 	defer c.cacheMutex.Unlock()
 
-	c.cache[key] = &CacheEntry{
-		Data:      data,
-		Timestamp: time.Now(),
-		TTL:       c.cacheTTL,
-	}
-}
+// 	c.cache[key] = &CacheEntry{
+// 		Data:      data,
+// 		Timestamp: time.Now(),
+// 		TTL:       c.cacheTTL,
+// 	}
+// }
 
 // GetSupportCardImageURL generates the image URL for a support card based on its URL name
 func (c *GametoraClient) GetSupportCardImageURL(urlName string) string {

@@ -1,4 +1,4 @@
-package uma
+package shared
 
 // GametoraSupportsResponse represents the response from the supports.json endpoint
 type GametoraSupportsResponse struct {

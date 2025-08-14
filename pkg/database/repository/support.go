@@ -33,3 +33,11 @@ func (r *SupportCardRepository) GetSupportCardByID(id uuid.UUID) (*models.Suppor
 func (r *SupportCardRepository) CreateSupportCard(supportCard *models.SupportCard) error {
 	return r.db.Create(supportCard).Error
 }
+
+func (r *SupportCardRepository) GetSupportCardsByTitle(title string) ([]models.SupportCard, error) {
+	var supportCards []models.SupportCard
+	if err := r.db.Where("title ILIKE ? OR title_en ILIKE ?", "%"+title+"%", "%"+title+"%").Find(&supportCards).Error; err != nil {
+		return nil, err
+	}
+	return supportCards, nil
+}

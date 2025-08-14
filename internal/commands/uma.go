@@ -8,13 +8,14 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/config"
 	"github.com/latoulicious/HKTM/pkg/database"
-	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
 	"github.com/latoulicious/HKTM/pkg/uma/navigation"
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
-var umaClient = uma.NewClient()
+var umaClient = handler.NewClient()
 var navigationManager = navigation.GetNavigationManager()
-var gametoraClient *uma.GametoraClient
+var gametoraClient *handler.GametoraClient
 var umaDB *database.DatabaseManager
 
 // InitializeUmaCommands initializes the UMA commands with database for caching
@@ -25,7 +26,7 @@ func InitializeUmaCommands(db *database.DatabaseManager) {
 // InitializeGametoraClient initializes the global gametora client with configuration
 func InitializeGametoraClient(cfg interface{}) {
 	if config, ok := cfg.(*config.Config); ok {
-		gametoraClient = uma.NewGametoraClient(config)
+		gametoraClient = handler.NewGametoraClient(config)
 	}
 }
 
@@ -69,12 +70,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for character...")
 
 	// Search for character with caching
-	var result *uma.CharacterSearchResult
+	var result *shared.CharacterSearchResult
 
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedCharacterSearch(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*uma.CharacterSearchResult); ok {
+			if cachedResult, ok := cached.(*shared.CharacterSearchResult); ok {
 				result = cachedResult
 			} else {
 				// If type assertion fails, search using the original client
@@ -132,12 +133,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	}
 
 	// Fetch character images with caching
-	var imagesResult *uma.CharacterImagesResult
+	var imagesResult *shared.CharacterImagesResult
 
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedCharacterImages(result.Character.ID); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*uma.CharacterImagesResult); ok {
+			if cachedResult, ok := cached.(*shared.CharacterImagesResult); ok {
 				imagesResult = cachedResult
 			} else {
 				// If type assertion fails, fetch using the original client
@@ -204,12 +205,12 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card...")
 
 	// Search for support card with caching
-	var result *uma.SupportCardSearchResult
+	var result *shared.SupportCardSearchResult
 
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedSupportCardSearch(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*uma.SupportCardSearchResult); ok {
+			if cachedResult, ok := cached.(*shared.SupportCardSearchResult); ok {
 				result = cachedResult
 			} else {
 				// If type assertion fails, search using the original client
@@ -283,7 +284,7 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 }
 
 // createSupportCardEmbed creates an embed for a support card
-func createSupportCardEmbed(supportCard *uma.SupportCard) *discordgo.MessageEmbed {
+func createSupportCardEmbed(supportCard *shared.SupportCard) *discordgo.MessageEmbed {
 	// Determine embed color based on rarity
 	var color int
 	switch supportCard.RarityString {
@@ -360,12 +361,12 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card skills using Gametora API...")
 
 	// Search for support card using Gametora API with caching
-	var result *uma.SimplifiedGametoraSearchResult
+	var result *shared.SimplifiedGametoraSearchResult
 
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedGametoraSkills(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*uma.SimplifiedGametoraSearchResult); ok {
+			if cachedResult, ok := cached.(*shared.SimplifiedGametoraSearchResult); ok {
 				result = cachedResult
 			} else {
 				// If type assertion fails, search using the Gametora client
@@ -480,7 +481,7 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 }
 
 // createSimplifiedSkillsEmbed creates a simplified embed showing only skills for a support card
-func createSimplifiedSkillsEmbed(supportCard *uma.SimplifiedSupportCard) *discordgo.MessageEmbed {
+func createSimplifiedSkillsEmbed(supportCard *shared.SimplifiedSupportCard) *discordgo.MessageEmbed {
 	// Determine embed color based on rarity
 	var color int
 	switch supportCard.Rarity {
@@ -625,7 +626,7 @@ func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args
 }
 
 // createMultiVersionSupportCardEmbed creates an embed showing all versions of a support card
-func createMultiVersionSupportCardEmbed(supportCards []uma.SupportCard) *discordgo.MessageEmbed {
+func createMultiVersionSupportCardEmbed(supportCards []shared.SupportCard) *discordgo.MessageEmbed {
 	// Use the highest rarity card for the main embed info
 	mainCard := supportCards[0]
 

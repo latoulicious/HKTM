@@ -1,4 +1,4 @@
-package uma
+package handler
 
 import (
 	"encoding/json"
@@ -8,13 +8,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 // Client represents the Uma Musume API client
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
-	cache      map[string]*CacheEntry
+	// cache      map[string]*shared.CacheEntry
 	cacheMutex sync.RWMutex
 	cacheTTL   time.Duration
 }
@@ -26,71 +28,122 @@ func NewClient() *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		cache:    make(map[string]*CacheEntry),
+		// cache:    make(map[string]*shared.CacheEntry),
 		cacheTTL: 5 * time.Minute, // Cache for 5 minutes
 	}
 }
 
 // SearchCharacter searches for a character by name
-func (c *Client) SearchCharacter(query string) *CharacterSearchResult {
-	// Check cache first
-	cacheKey := fmt.Sprintf("char_search_%s", strings.ToLower(query))
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*CharacterSearchResult); ok {
-			return result
-		}
-	}
+func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
+	// // Check cache first
+	// cacheKey := fmt.Sprintf("char_search_%s", strings.ToLower(query))
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*shared.CharacterSearchResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// Make API request
 	url := fmt.Sprintf("%s/v1/character/list", c.baseURL)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
-		result := &CharacterSearchResult{
+		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch character data: %v", err),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		result := &CharacterSearchResult{
+		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	var apiResp APIResponse
+	var apiResp shared.APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		result := &CharacterSearchResult{
+		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode API response: %v", err),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
 	// Find the best match
 	bestMatch := c.findBestMatch(query, apiResp)
 
-	result := &CharacterSearchResult{
+	result := &shared.CharacterSearchResult{
 		Found:     bestMatch != nil,
 		Character: bestMatch,
 		Query:     query,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
+	return result
+}
+
+// GetAllCharacters fetches all characters from the API
+func (c *Client) GetAllCharacters() *shared.CharacterListResult {
+	// // Check cache first
+	// cacheKey := "all_characters"
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*shared.CharacterListResult); ok {
+	// 		return result
+	// 	}
+	// }
+
+	// Make API request
+	url := fmt.Sprintf("%s/v1/character/list", c.baseURL)
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		result := &shared.CharacterListResult{
+			Found: false,
+			Error: fmt.Errorf("failed to fetch character data: %v", err),
+		}
+		// c.setCache(cacheKey, result)
+		return result
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		result := &shared.CharacterListResult{
+			Found: false,
+			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
+		}
+		// c.setCache(cacheKey, result)
+		return result
+	}
+
+	var apiResp shared.APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		result := &shared.CharacterListResult{
+			Found: false,
+			Error: fmt.Errorf("failed to decode API response: %v", err),
+		}
+		// c.setCache(cacheKey, result)
+		return result
+	}
+
+	result := &shared.CharacterListResult{
+		Found:      true,
+		Characters: apiResp,
+	}
+
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // findBestMatch finds the best character match for the given query
-func (c *Client) findBestMatch(query string, characters []Character) *Character {
+func (c *Client) findBestMatch(query string, characters []shared.Character) *shared.Character {
 	query = strings.ToLower(query)
 
 	// First, try exact match with English name
@@ -130,95 +183,95 @@ func (c *Client) findBestMatch(query string, characters []Character) *Character 
 }
 
 // GetCharacterImages fetches all images for a character by ID
-func (c *Client) GetCharacterImages(charaID int) *CharacterImagesResult {
-	// Check cache first
-	cacheKey := fmt.Sprintf("char_images_%d", charaID)
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*CharacterImagesResult); ok {
-			return result
-		}
-	}
+func (c *Client) GetCharacterImages(charaID int) *shared.CharacterImagesResult {
+	// // Check cache first
+	// cacheKey := fmt.Sprintf("char_images_%d", charaID)
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*CharacterImagesResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// Make API request
 	url := fmt.Sprintf("%s/v1/character/images/%d", c.baseURL, charaID)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
-		result := &CharacterImagesResult{
+		result := &shared.CharacterImagesResult{
 			Found:   false,
 			Error:   fmt.Errorf("failed to fetch character images: %v", err),
 			CharaID: charaID,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		result := &CharacterImagesResult{
+		result := &shared.CharacterImagesResult{
 			Found:   false,
 			Error:   fmt.Errorf("API returned status code: %d", resp.StatusCode),
 			CharaID: charaID,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	var images []CharacterImageCategory
+	var images []shared.CharacterImageCategory
 	if err := json.NewDecoder(resp.Body).Decode(&images); err != nil {
-		result := &CharacterImagesResult{
+		result := &shared.CharacterImagesResult{
 			Found:   false,
 			Error:   fmt.Errorf("failed to decode API response: %v", err),
 			CharaID: charaID,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	result := &CharacterImagesResult{
+	result := &shared.CharacterImagesResult{
 		Found:   true,
 		Images:  images,
 		CharaID: charaID,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // SearchSupportCard searches for a support card by name
-func (c *Client) SearchSupportCard(query string) *SupportCardSearchResult {
-	// Check cache first
-	cacheKey := fmt.Sprintf("support_search_%s", strings.ToLower(query))
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*SupportCardSearchResult); ok {
-			return result
-		}
-	}
+func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult {
+	// // Check cache first
+	// cacheKey := fmt.Sprintf("support_search_%s", strings.ToLower(query))
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*SupportCardSearchResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// First, get the list of support cards
 	listResult := c.GetSupportCardList()
 	if !listResult.Found {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: listResult.Error,
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
 	// Find all matches for the same character
 	matches := c.findAllSupportCardMatches(query, listResult.SupportCards)
 	if len(matches) == 0 {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
 	// Get detailed information for all matched cards
-	var detailedCards []SupportCard
+	var detailedCards []shared.SupportCard
 	for _, match := range matches {
 		detailedResult := c.GetSupportCard(match.ID)
 		if detailedResult.Found && detailedResult.SupportCard != nil {
@@ -227,12 +280,12 @@ func (c *Client) SearchSupportCard(query string) *SupportCardSearchResult {
 	}
 
 	if len(detailedCards) == 0 {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch detailed information for any matched cards"),
 			Query: query,
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
@@ -242,124 +295,124 @@ func (c *Client) SearchSupportCard(query string) *SupportCardSearchResult {
 		return rarityOrder[detailedCards[i].RarityString] > rarityOrder[detailedCards[j].RarityString]
 	})
 
-	result := &SupportCardSearchResult{
+	result := &shared.SupportCardSearchResult{
 		Found:        true,
 		SupportCard:  &detailedCards[0], // Keep the first one for backward compatibility
 		SupportCards: detailedCards,
 		Query:        query,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // GetSupportCardList fetches the list of all support cards
-func (c *Client) GetSupportCardList() *SupportCardListResult {
-	// Check cache first
-	cacheKey := "support_list"
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*SupportCardListResult); ok {
-			return result
-		}
-	}
+func (c *Client) GetSupportCardList() *shared.SupportCardListResult {
+	// // Check cache first
+	// cacheKey := "support_list"
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*SupportCardListResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// Make API request
 	url := fmt.Sprintf("%s/v1/support", c.baseURL)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
-		result := &SupportCardListResult{
+		result := &shared.SupportCardListResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch support card list: %v", err),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		result := &SupportCardListResult{
+		result := &shared.SupportCardListResult{
 			Found: false,
 			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	var supportCards []SupportCard
+	var supportCards []shared.SupportCard
 	if err := json.NewDecoder(resp.Body).Decode(&supportCards); err != nil {
-		result := &SupportCardListResult{
+		result := &shared.SupportCardListResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode API response: %v", err),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	result := &SupportCardListResult{
+	result := &shared.SupportCardListResult{
 		Found:        true,
 		SupportCards: supportCards,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // GetSupportCard fetches detailed information for a specific support card
-func (c *Client) GetSupportCard(supportID int) *SupportCardSearchResult {
-	// Check cache first
-	cacheKey := fmt.Sprintf("support_detail_%d", supportID)
-	if cached := c.getFromCache(cacheKey); cached != nil {
-		if result, ok := cached.(*SupportCardSearchResult); ok {
-			return result
-		}
-	}
+func (c *Client) GetSupportCard(supportID int) *shared.SupportCardSearchResult {
+	// // Check cache first
+	// cacheKey := fmt.Sprintf("support_detail_%d", supportID)
+	// if cached := c.getFromCache(cacheKey); cached != nil {
+	// 	if result, ok := cached.(*SupportCardSearchResult); ok {
+	// 		return result
+	// 	}
+	// }
 
 	// Make API request
 	url := fmt.Sprintf("%s/v1/support/%d", c.baseURL, supportID)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch support card details: %v", err),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	var supportCard SupportCard
+	var supportCard shared.SupportCard
 	if err := json.NewDecoder(resp.Body).Decode(&supportCard); err != nil {
-		result := &SupportCardSearchResult{
+		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode API response: %v", err),
 		}
-		c.setCache(cacheKey, result)
+		// c.setCache(cacheKey, result)
 		return result
 	}
 
-	result := &SupportCardSearchResult{
+	result := &shared.SupportCardSearchResult{
 		Found:       true,
 		SupportCard: &supportCard,
 	}
 
-	c.setCache(cacheKey, result)
+	// c.setCache(cacheKey, result)
 	return result
 }
 
 // findAllSupportCardMatches finds all support cards that match the query,
 // grouping by character ID to find all versions of the same character's support cards.
-func (c *Client) findAllSupportCardMatches(query string, supportCards []SupportCard) []SupportCard {
+func (c *Client) findAllSupportCardMatches(query string, supportCards []shared.SupportCard) []shared.SupportCard {
 	query = strings.ToLower(query)
-	var matches []SupportCard
+	var matches []shared.SupportCard
 	var matchedCharIDs []int
 
 	// First pass: find all cards that match the query
@@ -428,7 +481,7 @@ func (c *Client) findAllSupportCardMatches(query string, supportCards []SupportC
 		}
 
 		// Find all cards for the same characters
-		var allCardsForCharacter []SupportCard
+		var allCardsForCharacter []shared.SupportCard
 		for _, card := range supportCards {
 			if charIDSet[card.CharaID] {
 				allCardsForCharacter = append(allCardsForCharacter, card)
@@ -441,26 +494,26 @@ func (c *Client) findAllSupportCardMatches(query string, supportCards []SupportC
 	return matches
 }
 
-// getFromCache retrieves an item from cache
-func (c *Client) getFromCache(key string) interface{} {
-	c.cacheMutex.RLock()
-	defer c.cacheMutex.RUnlock()
+// // getFromCache retrieves an item from cache
+// func (c *Client) getFromCache(key string) interface{} {
+// 	c.cacheMutex.RLock()
+// 	defer c.cacheMutex.RUnlock()
 
-	if entry, exists := c.cache[key]; exists && !entry.IsExpired() {
-		return entry.Data
-	}
+// 	if entry, exists := c.cache[key]; exists && !entry.IsExpired() {
+// 		return entry.Data
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-// setCache stores an item in cache
-func (c *Client) setCache(key string, data interface{}) {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+// // setCache stores an item in cache
+// func (c *Client) setCache(key string, data interface{}) {
+// 	c.cacheMutex.Lock()
+// 	defer c.cacheMutex.Unlock()
 
-	c.cache[key] = &CacheEntry{
-		Data:      data,
-		Timestamp: time.Now(),
-		TTL:       c.cacheTTL,
-	}
-}
+// 	c.cache[key] = &CacheEntry{
+// 		Data:      data,
+// 		Timestamp: time.Now(),
+// 		TTL:       c.cacheTTL,
+// 	}
+// }

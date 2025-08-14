@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
 )
 
 // UtilityCommand handles utility-related commands
@@ -36,7 +36,7 @@ func CronStatusCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 		return
 	}
 
-	client := uma.GetGametoraClient()
+	client := handler.GetGametoraClient()
 	if client == nil {
 		s.ChannelMessageSend(m.ChannelID, "❌ Gametora client not available.")
 		return
@@ -113,7 +113,7 @@ func CronRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args [
 		return
 	}
 
-	client := uma.GetGametoraClient()
+	client := handler.GetGametoraClient()
 	if client == nil {
 		s.ChannelMessageSend(m.ChannelID, "❌ Gametora client not available.")
 		return

@@ -15,7 +15,7 @@ import (
 	"github.com/latoulicious/HKTM/internal/presence"
 	"github.com/latoulicious/HKTM/pkg/common"
 	"github.com/latoulicious/HKTM/pkg/database"
-	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
 )
 
 func main() {
@@ -103,7 +103,7 @@ func main() {
 	dg.Close()
 
 	// Stop the build ID manager cron job
-	if gametoraClient := uma.GetGametoraClient(); gametoraClient != nil {
+	if gametoraClient := handler.GetGametoraClient(); gametoraClient != nil {
 		gametoraClient.StopBuildIDManager()
 	}
 }
