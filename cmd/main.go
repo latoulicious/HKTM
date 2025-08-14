@@ -46,11 +46,14 @@ func main() {
 	// Set the presence manager in the commands package
 	commands.SetPresenceManager(presenceManager)
 
-	// Initialize database for caching
-	db, err := database.NewDatabase("uma_cache.db")
+	// Initialize PostgreSQL database for caching
+	gormDB, err := database.NewGormDBFromConfig(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
+
+	// Create database manager with the same interface as the old SQLite database
+	db := database.NewDatabaseManager(gormDB)
 	defer db.Close()
 
 	// Start cache cleanup goroutine

@@ -9,14 +9,19 @@ import (
 type Config struct {
 	DiscordToken string
 	OwnerID      string
+
 	// Cron configuration
 	CronEnabled  bool
 	CronSchedule string
+
+	// Database configuration
+	DatabaseURL string
 }
 
 var (
 	ErrDiscordTokenNotSet = os.ErrInvalid
 	ErrOwnerIDNotSet      = os.ErrInvalid
+	ErrDBPathNotSet       = os.ErrInvalid
 )
 
 func LoadConfig() (*Config, error) {
@@ -47,10 +52,16 @@ func LoadConfig() (*Config, error) {
 		cronSchedule = schedule
 	}
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return nil, ErrDBPathNotSet
+	}
+
 	return &Config{
 		DiscordToken: discordToken,
 		OwnerID:      ownerID,
 		CronEnabled:  cronEnabled,
 		CronSchedule: cronSchedule,
+		DatabaseURL:  databaseURL,
 	}, nil
 }

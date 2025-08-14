@@ -15,10 +15,10 @@ import (
 var umaClient = uma.NewClient()
 var navigationManager = navigation.GetNavigationManager()
 var gametoraClient *uma.GametoraClient
-var umaDB *database.Database
+var umaDB *database.DatabaseManager
 
 // InitializeUmaCommands initializes the UMA commands with database for caching
-func InitializeUmaCommands(db *database.Database) {
+func InitializeUmaCommands(db *database.DatabaseManager) {
 	umaDB = db
 }
 
@@ -74,7 +74,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedCharacterSearch(query); err == nil && cached != nil {
-			result = cached
+			if cachedResult, ok := cached.(*uma.CharacterSearchResult); ok {
+				result = cachedResult
+			} else {
+				// If type assertion fails, search using the original client
+				result = umaClient.SearchCharacter(query)
+			}
 		} else {
 			// If not in cache, search using the original client
 			result = umaClient.SearchCharacter(query)
@@ -132,7 +137,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedCharacterImages(result.Character.ID); err == nil && cached != nil {
-			imagesResult = cached
+			if cachedResult, ok := cached.(*uma.CharacterImagesResult); ok {
+				imagesResult = cachedResult
+			} else {
+				// If type assertion fails, fetch using the original client
+				imagesResult = umaClient.GetCharacterImages(result.Character.ID)
+			}
 		} else {
 			// If not in cache, fetch using the original client
 			imagesResult = umaClient.GetCharacterImages(result.Character.ID)
@@ -199,7 +209,12 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedSupportCardSearch(query); err == nil && cached != nil {
-			result = cached
+			if cachedResult, ok := cached.(*uma.SupportCardSearchResult); ok {
+				result = cachedResult
+			} else {
+				// If type assertion fails, search using the original client
+				result = umaClient.SearchSupportCard(query)
+			}
 		} else {
 			// If not in cache, search using the original client
 			result = umaClient.SearchSupportCard(query)
@@ -350,7 +365,12 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	// Check database cache first
 	if umaDB != nil {
 		if cached, err := umaDB.GetCachedGametoraSkills(query); err == nil && cached != nil {
-			result = cached
+			if cachedResult, ok := cached.(*uma.SimplifiedGametoraSearchResult); ok {
+				result = cachedResult
+			} else {
+				// If type assertion fails, search using the Gametora client
+				result = gametoraClient.SearchSimplifiedSupportCard(query)
+			}
 		} else {
 			// If not in cache, search using the Gametora client
 			result = gametoraClient.SearchSimplifiedSupportCard(query)
