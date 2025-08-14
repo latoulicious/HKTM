@@ -3,7 +3,9 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +23,7 @@ type GametoraClient struct {
 	baseURL    string
 	httpClient *http.Client
 	// cache          map[string]*CacheEntry
-	cacheMutex     sync.RWMutex
+	// cacheMutex     sync.RWMutex
 	cacheTTL       time.Duration
 	buildID        string
 	buildMutex     sync.RWMutex
@@ -99,14 +101,13 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 	defer resp.Body.Close()
 
 	// Read the response body
-	body := make([]byte, 1024*1024) // 1MB buffer
-	n, err := resp.Body.Read(body)
-	if err != nil && n == 0 {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %v", err)
 	}
 
 	// Look for build ID patterns
-	bodyStr := string(body[:n])
+	bodyStr := string(body)
 
 	// Try to find build ID using different approaches
 
@@ -131,34 +132,23 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 
 	// Try to find buildId in JSON
 	if strings.Contains(bodyStr, "buildId") {
-		start := strings.Index(bodyStr, "buildId")
-		if start != -1 {
-			// Look for the value after buildId
-			valueStart := strings.Index(bodyStr[start:], "\"")
-			if valueStart != -1 {
-				valueStart += start + valueStart + 1
-				valueEnd := strings.Index(bodyStr[valueStart:], "\"")
-				if valueEnd != -1 {
-					buildID := bodyStr[valueStart : valueStart+valueEnd]
-					if len(buildID) > 10 && len(buildID) < 50 {
-						c.buildMutex.Lock()
-						c.buildID = buildID
-						c.buildMutex.Unlock()
-						return buildID, nil
-					}
-				}
+		// Look for the pattern "buildId":"value" in the entire body
+		pattern := `"buildId":"([^"]+)"`
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(bodyStr)
+		if len(matches) > 1 {
+			buildID := matches[1]
+			if len(buildID) > 10 && len(buildID) < 50 {
+				c.buildMutex.Lock()
+				c.buildID = buildID
+				c.buildMutex.Unlock()
+				return buildID, nil
 			}
 		}
 	}
 
-	// If no build ID found, try a hardcoded one as fallback
-	// This is the current build ID as of 2025
-	fallbackBuildID := "af-gyQMfRiMTB3XvweJdd"
-	c.buildMutex.Lock()
-	c.buildID = fallbackBuildID
-	c.buildMutex.Unlock()
-
-	return fallbackBuildID, nil
+	// If no build ID found, return an error instead of using outdated fallback
+	return "", fmt.Errorf("could not dynamically fetch build ID from Gametora website - the site structure may have changed")
 }
 
 // SearchSimplifiedSupportCard searches for a support card using the Gametora JSON API and returns simplified structure

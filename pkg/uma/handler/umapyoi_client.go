@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
@@ -17,8 +16,8 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	// cache      map[string]*shared.CacheEntry
-	cacheMutex sync.RWMutex
-	cacheTTL   time.Duration
+	// cacheMutex sync.RWMutex
+	cacheTTL time.Duration
 }
 
 // NewClient creates a new Uma Musume API client
