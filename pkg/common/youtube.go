@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"net/url"
@@ -71,51 +72,67 @@ func GetYouTubeThumbnailURL(videoID string) string {
 	return fmt.Sprintf("https://img.youtube.com/vi/%s/maxresdefault.jpg", videoID)
 }
 
-// GetYouTubeMetadata extracts both title and duration from a YouTube URL
+// GetYouTubeMetadata extracts both title and duration from a YouTube URL with timeout and retry
 func GetYouTubeMetadata(urlStr string) (title string, duration time.Duration, err error) {
 	log.Printf("Extracting metadata from: %s", urlStr)
 
-	// Use yt-dlp to get both title and duration
-	cmd := exec.Command("yt-dlp",
-		"--no-playlist",
-		"--no-warnings",
-		"--print", "title",
-		"--print", "duration",
-		urlStr)
+	// Add timeout and retry logic
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
+		// Use yt-dlp to get both title and duration
+		cmd := exec.CommandContext(ctx, "yt-dlp",
+			"--no-playlist",
+			"--no-warnings",
+			"--print", "title",
+			"--print", "duration",
+			urlStr)
 
-	if err := cmd.Run(); err != nil {
-		log.Printf("Failed to get metadata: %v", err)
-		return "Unknown Title", 0, fmt.Errorf("failed to extract metadata: %v", err)
-	}
+		var out bytes.Buffer
+		cmd.Stdout = &out
 
-	output := strings.TrimSpace(out.String())
-	lines := strings.Split(output, "\n")
+		if err := cmd.Run(); err != nil {
+			cancel()
+			if attempt < maxRetries-1 {
+				log.Printf("Metadata extraction attempt %d failed, retrying in 2 seconds...", attempt+1)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			log.Printf("Failed to get metadata after %d attempts: %v", maxRetries, err)
+			return "Unknown Title", 0, fmt.Errorf("failed to extract metadata: %v", err)
+		}
 
-	if len(lines) >= 1 {
-		title = strings.TrimSpace(lines[0])
-	}
-	if len(lines) >= 2 {
-		durationStr := strings.TrimSpace(lines[1])
-		if durationStr != "" && durationStr != "None" {
-			// yt-dlp returns duration in seconds
-			if seconds, parseErr := strconv.ParseFloat(durationStr, 64); parseErr == nil {
-				duration = time.Duration(seconds * float64(time.Second))
+		cancel()
+
+		output := strings.TrimSpace(out.String())
+		lines := strings.Split(output, "\n")
+
+		if len(lines) >= 1 {
+			title = strings.TrimSpace(lines[0])
+		}
+		if len(lines) >= 2 {
+			durationStr := strings.TrimSpace(lines[1])
+			if durationStr != "" && durationStr != "None" {
+				// yt-dlp returns duration in seconds
+				if seconds, parseErr := strconv.ParseFloat(durationStr, 64); parseErr == nil {
+					duration = time.Duration(seconds * float64(time.Second))
+				}
 			}
 		}
+
+		if title == "" {
+			title = "Unknown Title"
+		}
+
+		log.Printf("Extracted metadata - Title: %s, Duration: %v", title, duration)
+		return title, duration, nil
 	}
 
-	if title == "" {
-		title = "Unknown Title"
-	}
-
-	log.Printf("Extracted metadata - Title: %s, Duration: %v", title, duration)
-	return title, duration, nil
+	return "Unknown Title", 0, fmt.Errorf("failed to extract metadata after %d attempts", maxRetries)
 }
 
-// GetYouTubeAudioStreamWithMetadata extracts stream URL, title, and duration
+// GetYouTubeAudioStreamWithMetadata extracts stream URL, title, and duration with improved reliability
 func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, duration time.Duration, err error) {
 	log.Printf("Extracting audio stream and metadata from: %s", urlStr)
 
@@ -127,9 +144,9 @@ func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, 
 		duration = 0
 	}
 
-	// Then get stream URL with multiple fallback strategies
+	// Then get stream URL with multiple fallback strategies and retry logic
 	strategies := [][]string{
-		// Strategy 1: Best audio with format preference
+		// Strategy 1: Best audio with format preference (updated for current YouTube)
 		{"-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio"},
 
 		// Strategy 2: Android client (often bypasses restrictions)
@@ -142,79 +159,114 @@ func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, 
 		{"-f", "worst[ext=m4a]/worst"},
 	}
 
-	for i, strategy := range strategies {
-		log.Printf("Trying extraction strategy %d/%d", i+1, len(strategies))
+	maxRetries := 2
+	for retry := 0; retry < maxRetries; retry++ {
+		for i, strategy := range strategies {
+			log.Printf("Trying extraction strategy %d/%d (retry %d/%d)", i+1, len(strategies), retry+1, maxRetries)
 
-		args := append([]string{"--no-playlist", "--no-warnings", "-g"}, strategy...)
-		args = append(args, urlStr)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-		cmd := exec.Command("yt-dlp", args...)
-		var out bytes.Buffer
-		cmd.Stdout = &out
+			args := append([]string{"--no-playlist", "--no-warnings", "-g"}, strategy...)
+			args = append(args, urlStr)
 
-		if err := cmd.Run(); err != nil {
-			log.Printf("Strategy %d failed: %v", i+1, err)
-			continue
+			cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+
+			if err := cmd.Run(); err != nil {
+				cancel()
+				log.Printf("Strategy %d failed: %v", i+1, err)
+				continue
+			}
+
+			cancel()
+
+			streamURL = strings.TrimSpace(out.String())
+			if streamURL != "" {
+				// Take first URL if multiple are returned
+				urls := strings.Split(streamURL, "\n")
+				if len(urls) > 0 && urls[0] != "" {
+					streamURL = urls[0]
+					log.Printf("Successfully extracted stream URL using strategy %d", i+1)
+					return streamURL, title, duration, nil
+				}
+			}
 		}
 
-		streamURL = strings.TrimSpace(out.String())
-		if streamURL != "" {
-			// Take first URL if multiple are returned
-			urls := strings.Split(streamURL, "\n")
-			if len(urls) > 0 && urls[0] != "" {
-				streamURL = urls[0]
-				log.Printf("Successfully extracted stream URL using strategy %d", i+1)
-				return streamURL, title, duration, nil
-			}
+		if retry < maxRetries-1 {
+			log.Printf("All strategies failed on attempt %d, retrying in 3 seconds...", retry+1)
+			time.Sleep(3 * time.Second)
 		}
 	}
 
-	return "", title, duration, fmt.Errorf("failed to extract audio stream URL after trying all strategies")
+	return "", title, duration, fmt.Errorf("failed to extract audio stream URL after trying all strategies with %d retries", maxRetries)
 }
 
-// SearchYouTubeAndGetURL searches for a query on YouTube and returns the first result's URL
+// SearchYouTubeAndGetURL searches for a query on YouTube and returns the first result's URL with timeout
 func SearchYouTubeAndGetURL(query string) (url string, title string, duration time.Duration, err error) {
 	log.Printf("Searching YouTube for: %s", query)
 
-	// Use yt-dlp to search for videos
-	cmd := exec.Command("yt-dlp",
-		"--no-playlist",
-		"--no-warnings",
-		"--print", "webpage_url",
-		"--print", "title",
-		"--print", "duration",
-		"--max-downloads", "1", // Only get the first result
-		"ytsearch1:"+query) // Search for 1 result
+	// Add timeout and retry logic
+	maxRetries := 2
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
+		// Use yt-dlp to search for videos
+		cmd := exec.CommandContext(ctx, "yt-dlp",
+			"--no-playlist",
+			"--no-warnings",
+			"--print", "webpage_url",
+			"--print", "title",
+			"--print", "duration",
+			"--max-downloads", "1", // Only get the first result
+			"ytsearch1:"+query) // Search for 1 result
 
-	runErr := cmd.Run()
-	output := strings.TrimSpace(out.String())
+		var out bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &stderr
 
-	// Parse the output regardless of exit status
-	lines := strings.Split(output, "\n")
+		runErr := cmd.Run()
+		cancel()
 
-	if len(lines) >= 1 {
-		url = strings.TrimSpace(lines[0])
-	}
-	if len(lines) >= 2 {
-		title = strings.TrimSpace(lines[1])
-	}
-	if len(lines) >= 3 {
-		durationStr := strings.TrimSpace(lines[2])
-		if durationStr != "" && durationStr != "None" {
-			// yt-dlp returns duration in seconds
-			if seconds, parseErr := strconv.ParseFloat(durationStr, 64); parseErr == nil {
-				duration = time.Duration(seconds * float64(time.Second))
+		output := strings.TrimSpace(out.String())
+
+		// Parse the output regardless of exit status
+		lines := strings.Split(output, "\n")
+
+		if len(lines) >= 1 {
+			url = strings.TrimSpace(lines[0])
+		}
+		if len(lines) >= 2 {
+			title = strings.TrimSpace(lines[1])
+		}
+		if len(lines) >= 3 {
+			durationStr := strings.TrimSpace(lines[2])
+			if durationStr != "" && durationStr != "None" {
+				// yt-dlp returns duration in seconds
+				if seconds, parseErr := strconv.ParseFloat(durationStr, 64); parseErr == nil {
+					duration = time.Duration(seconds * float64(time.Second))
+				}
 			}
 		}
-	}
 
-	// Only return an error if we got no output AND there was an error
-	if url == "" {
+		// If we got a URL, return it even if there was an error
+		if url != "" {
+			if title == "" {
+				title = "Unknown Title"
+			}
+			log.Printf("Search result - URL: %s, Title: %s, Duration: %v", url, title, duration)
+			return url, title, duration, nil
+		}
+
+		// If we didn't get a URL and this isn't the last attempt, retry
+		if attempt < maxRetries-1 {
+			log.Printf("Search attempt %d failed, retrying in 2 seconds...", attempt+1)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Last attempt failed
 		if runErr != nil {
 			log.Printf("Failed to search YouTube: %v, stderr: %s", runErr, stderr.String())
 			return "", "", 0, fmt.Errorf("failed to search YouTube: %v", runErr)
@@ -222,12 +274,7 @@ func SearchYouTubeAndGetURL(query string) (url string, title string, duration ti
 		return "", "", 0, fmt.Errorf("no search results found")
 	}
 
-	if title == "" {
-		title = "Unknown Title"
-	}
-
-	log.Printf("Search result - URL: %s, Title: %s, Duration: %v", url, title, duration)
-	return url, title, duration, nil
+	return "", "", 0, fmt.Errorf("failed to search YouTube after %d attempts", maxRetries)
 }
 
 // IsURL checks if a string appears to be a URL
