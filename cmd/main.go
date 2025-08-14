@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -47,17 +46,17 @@ func main() {
 	commands.SetPresenceManager(presenceManager)
 
 	// Initialize PostgreSQL database for caching
-	gormDB, err := database.NewGormDBFromConfig(cfg.DatabaseURL)
+	db, err := database.NewGormDBFromConfig(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	// Create database manager with the same interface as the old SQLite database
-	db := database.NewDatabaseManager(gormDB)
-	defer db.Close()
-
-	// Start cache cleanup goroutine
-	db.StartCacheCleanup(1 * time.Hour)
+	// Get the underlying *sql.DB for Close() method
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("Failed to get underlying database: %v", err)
+	}
+	defer sqlDB.Close()
 
 	// Initialize gametora client with config
 	commands.InitializeGametoraClient(cfg)

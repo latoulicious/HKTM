@@ -152,8 +152,8 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 	}
 
 	// If no build ID found, try a hardcoded one as fallback
-	// This is the build ID from your example
-	fallbackBuildID := "4Lod4e9rq2HCjy-VKjMHJ"
+	// This is the current build ID as of 2025
+	fallbackBuildID := "af-gyQMfRiMTB3XvweJdd"
 	c.buildMutex.Lock()
 	c.buildID = fallbackBuildID
 	c.buildMutex.Unlock()

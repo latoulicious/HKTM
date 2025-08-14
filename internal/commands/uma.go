@@ -7,19 +7,19 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/config"
-	"github.com/latoulicious/HKTM/pkg/database"
 	"github.com/latoulicious/HKTM/pkg/uma/handler"
 	"github.com/latoulicious/HKTM/pkg/uma/navigation"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
+	"gorm.io/gorm"
 )
 
 var umaClient = handler.NewClient()
 var navigationManager = navigation.GetNavigationManager()
 var gametoraClient *handler.GametoraClient
-var umaDB *database.DatabaseManager
+var umaDB *gorm.DB
 
 // InitializeUmaCommands initializes the UMA commands with database for caching
-func InitializeUmaCommands(db *database.DatabaseManager) {
+func InitializeUmaCommands(db *gorm.DB) {
 	umaDB = db
 }
 
@@ -69,34 +69,8 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for character...")
 
-	// Search for character with caching
-	var result *shared.CharacterSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedCharacterSearch(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*shared.CharacterSearchResult); ok {
-				result = cachedResult
-			} else {
-				// If type assertion fails, search using the original client
-				result = umaClient.SearchCharacter(query)
-			}
-		} else {
-			// If not in cache, search using the original client
-			result = umaClient.SearchCharacter(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheCharacterSearch(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache character search: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = umaClient.SearchCharacter(query)
-	}
+	// Search for character
+	result := umaClient.SearchCharacter(query)
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -132,34 +106,8 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 		return
 	}
 
-	// Fetch character images with caching
-	var imagesResult *shared.CharacterImagesResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedCharacterImages(result.Character.ID); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*shared.CharacterImagesResult); ok {
-				imagesResult = cachedResult
-			} else {
-				// If type assertion fails, fetch using the original client
-				imagesResult = umaClient.GetCharacterImages(result.Character.ID)
-			}
-		} else {
-			// If not in cache, fetch using the original client
-			imagesResult = umaClient.GetCharacterImages(result.Character.ID)
-
-			// Cache the result if found or if it's a valid error response
-			if imagesResult != nil {
-				if err := umaDB.CacheCharacterImages(result.Character.ID, imagesResult, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache character images: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		imagesResult = umaClient.GetCharacterImages(result.Character.ID)
-	}
+	// Fetch character images
+	imagesResult := umaClient.GetCharacterImages(result.Character.ID)
 
 	// Create success embed with image navigation
 	embed := navigationManager.CreateCharacterEmbed(result.Character, imagesResult, 0)
@@ -204,34 +152,8 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card...")
 
-	// Search for support card with caching
-	var result *shared.SupportCardSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedSupportCardSearch(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*shared.SupportCardSearchResult); ok {
-				result = cachedResult
-			} else {
-				// If type assertion fails, search using the original client
-				result = umaClient.SearchSupportCard(query)
-			}
-		} else {
-			// If not in cache, search using the original client
-			result = umaClient.SearchSupportCard(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheSupportCardSearch(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache support card search: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = umaClient.SearchSupportCard(query)
-	}
+	// Search for support card
+	result := umaClient.SearchSupportCard(query)
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -360,34 +282,8 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card skills using Gametora API...")
 
-	// Search for support card using Gametora API with caching
-	var result *shared.SimplifiedGametoraSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedGametoraSkills(query); err == nil && cached != nil {
-			if cachedResult, ok := cached.(*shared.SimplifiedGametoraSearchResult); ok {
-				result = cachedResult
-			} else {
-				// If type assertion fails, search using the Gametora client
-				result = gametoraClient.SearchSimplifiedSupportCard(query)
-			}
-		} else {
-			// If not in cache, search using the Gametora client
-			result = gametoraClient.SearchSimplifiedSupportCard(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheGametoraSkills(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache Gametora skills: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = gametoraClient.SearchSimplifiedSupportCard(query)
-	}
+	// Search for support card using Gametora API
+	result := gametoraClient.SearchSimplifiedSupportCard(query)
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -710,59 +606,5 @@ func createMultiVersionSupportCardEmbed(supportCards []shared.SupportCard) *disc
 
 // CacheStatsCommand shows cache statistics
 func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	if umaDB == nil {
-		s.ChannelMessageSend(m.ChannelID, "❌ Cache database is not available.")
-		return
-	}
-
-	stats, err := umaDB.GetCacheStats()
-	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to get cache statistics: %v", err))
-		return
-	}
-
-	// Create embed with cache statistics
-	embed := &discordgo.MessageEmbed{
-		Title:       "📊 UMA Cache Statistics",
-		Description: "Current cache statistics for UMA data",
-		Color:       0x00ff00, // Green color
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae | UMA Cache Statistics",
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "🔍 Character Searches",
-				Value:  fmt.Sprintf("%d", stats["character_search"]),
-				Inline: true,
-			},
-			{
-				Name:   "🖼️ Character Images",
-				Value:  fmt.Sprintf("%d", stats["character_images"]),
-				Inline: true,
-			},
-			{
-				Name:   "🎴 Support Card Searches",
-				Value:  fmt.Sprintf("%d", stats["support_card_search"]),
-				Inline: true,
-			},
-			{
-				Name:   "📋 Support Card Lists",
-				Value:  fmt.Sprintf("%d", stats["support_card_list"]),
-				Inline: true,
-			},
-			{
-				Name:   "⚡ Gametora Skills",
-				Value:  fmt.Sprintf("%d", stats["gametora_skills"]),
-				Inline: true,
-			},
-			{
-				Name:   "🗄️ Total Cache Entries",
-				Value:  fmt.Sprintf("%d", stats["total_cache"]),
-				Inline: true,
-			},
-		},
-	}
-
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	s.ChannelMessageSend(m.ChannelID, "❌ Cache functionality has been removed. All searches now use direct API calls.")
 }

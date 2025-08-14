@@ -13,8 +13,8 @@ import (
 func main() {
 	// Parse the command line arguments
 	migrateFlag := flag.Bool("migrate", false, "Run the migrations")
-	flag.Parse()
 	resetFlag := flag.Bool("reset", false, "Reset the database")
+	flag.Parse()
 
 	// Load the environment variables
 	if err := godotenv.Load(); err != nil {
@@ -38,24 +38,19 @@ func main() {
 	if *resetFlag {
 		log.Println("Resetting database...")
 
-		db.Exec("SET session_replication_role = 'replica';")
+		// Get all table names
+		var tables []string
+		db.Raw("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()").Scan(&tables)
 
-		// Drop all tables
-		err := db.Exec(`
-			DO $$ DECLARE
-			r RECORD;
-			BEGIN
-				FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = current_schema()) LOOP
-					EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
-				END LOOP;
-			END $$;
-		`)
+		log.Printf("Found %d tables to drop", len(tables))
 
-		// Reset to normal state
-		db.Exec("SET session_replication_role = 'origin';")
-
-		if err != nil {
-			log.Fatalf("Failed to drop tables: %v", err)
+		// Drop each table individually
+		for _, table := range tables {
+			log.Printf("Dropping table: %s", table)
+			result := db.Exec("DROP TABLE IF EXISTS " + table + " CASCADE")
+			if result.Error != nil {
+				log.Printf("Warning: Failed to drop table %s: %v", table, result.Error)
+			}
 		}
 
 		log.Println("Database reset successfully")
