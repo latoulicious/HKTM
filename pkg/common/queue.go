@@ -233,3 +233,23 @@ func (mq *MusicQueue) StopAndCleanup() {
 
 	mq.isPlaying = false
 }
+
+// GetFreshStreamURLForCurrent gets a fresh stream URL for the current item
+// This is useful for handling YouTube URL expiration issues
+func (mq *MusicQueue) GetFreshStreamURLForCurrent() (string, error) {
+	mq.mu.RLock()
+	defer mq.mu.RUnlock()
+
+	if mq.current == nil {
+		return "", fmt.Errorf("no current item in queue")
+	}
+
+	// If it's a YouTube URL, get a fresh stream URL
+	if mq.current.OriginalURL != "" {
+		log.Printf("Getting fresh stream URL for YouTube video: %s", mq.current.Title)
+		return GetFreshYouTubeStreamURL(mq.current.OriginalURL)
+	}
+
+	// For non-YouTube URLs, return the stored URL
+	return mq.current.URL, nil
+}

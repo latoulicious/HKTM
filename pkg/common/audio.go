@@ -81,6 +81,38 @@ func (ap *AudioPipeline) PlayStream(streamURL string) error {
 	return nil
 }
 
+// PlayStreamWithOriginalURL starts streaming with URL refresh capability
+// This is useful for YouTube URLs that may expire
+func (ap *AudioPipeline) PlayStreamWithOriginalURL(streamURL, originalURL string) error {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+
+	if ap.isPlaying {
+		return fmt.Errorf("pipeline is already playing")
+	}
+
+	// Initialize Opus encoder
+	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
+	if err != nil {
+		return fmt.Errorf("failed to create opus encoder: %v", err)
+	}
+	encoder.SetBitrate(128000) // Higher bitrate for better quality
+	ap.opusEncoder = encoder
+
+	ap.isPlaying = true
+
+	// Start the main streaming goroutine with URL refresh capability
+	go ap.streamLoopWithURLRefresh(streamURL, originalURL)
+
+	// Start health monitoring in a separate goroutine
+	go ap.startHealthMonitoring()
+
+	// Start error handler
+	go ap.errorHandler(streamURL)
+
+	return nil
+}
+
 // streamLoop is the main audio streaming loop with restart capability
 func (ap *AudioPipeline) streamLoop(streamURL string) {
 	defer func() {
@@ -551,5 +583,86 @@ func (ap *AudioPipeline) checkHealth() {
 	if ap.voiceConn == nil || !ap.voiceConn.Ready {
 		log.Println("Health check failed: voice connection not ready")
 		ap.errorChan <- fmt.Errorf("voice connection health check failed")
+	}
+}
+
+// streamLoopWithURLRefresh is the main audio streaming loop with URL refresh capability
+func (ap *AudioPipeline) streamLoopWithURLRefresh(streamURL, originalURL string) {
+	defer func() {
+		ap.mu.Lock()
+		ap.isPlaying = false
+		ap.mu.Unlock()
+	}()
+
+	// Add a restart mutex to prevent multiple simultaneous restarts
+	var restartMutex sync.Mutex
+
+	for {
+		select {
+		case <-ap.ctx.Done():
+			log.Println("Audio pipeline context cancelled")
+			return
+		case <-ap.restartChan:
+			restartMutex.Lock()
+			if ap.restartCount >= ap.maxRestarts {
+				log.Printf("Max restart attempts (%d) reached, stopping", ap.maxRestarts)
+				ap.errorChan <- fmt.Errorf("max restarts exceeded")
+				restartMutex.Unlock()
+				return
+			}
+			ap.restartCount++
+			log.Printf("Restarting audio pipeline (attempt %d/%d)", ap.restartCount, ap.maxRestarts)
+			time.Sleep(2 * time.Second) // Brief delay before restart
+			restartMutex.Unlock()
+		}
+
+		// Try to get a fresh URL if we have an original URL (YouTube)
+		currentURL := streamURL
+		if originalURL != "" {
+			log.Println("Getting fresh stream URL to avoid expiration...")
+			freshURL, err := GetFreshYouTubeStreamURL(originalURL)
+			if err != nil {
+				log.Printf("Failed to get fresh URL, using original: %v", err)
+			} else {
+				currentURL = freshURL
+				log.Println("Successfully got fresh stream URL")
+			}
+		}
+
+		err := ap.streamAudio(currentURL)
+		if err != nil {
+			log.Printf("Stream error: %v", err)
+
+			// Check if this is a normal completion error or network timeout
+			errStr := err.Error()
+			if strings.Contains(errStr, "stream ended normally") ||
+				strings.Contains(errStr, "ffmpeg process exited") ||
+				strings.Contains(errStr, "connection timed out") ||
+				strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "invalid stream url") ||
+				strings.Contains(errStr, "ffmpeg failed to start") {
+				log.Println("Stream ended due to normal completion or network issue, not treating as error")
+				return
+			}
+
+			ap.errorChan <- err
+
+			// Check if we should restart
+			if ap.shouldRestart(err) {
+				restartMutex.Lock()
+				select {
+				case ap.restartChan <- struct{}{}:
+				default:
+					// If channel is full, don't send another restart signal
+				}
+				restartMutex.Unlock()
+				continue
+			}
+			return
+		}
+
+		// Normal completion
+		log.Println("Audio stream completed normally")
+		return
 	}
 }

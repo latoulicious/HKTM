@@ -443,8 +443,14 @@ func startNextInQueue(s *discordgo.Session, m *discordgo.MessageCreate, queue *c
 	description := item.Title
 	sendEmbedMessage(s, m.ChannelID, "🎶 Now Playing", description, 0x00ff00)
 
-	// Start streaming
-	err = pipeline.PlayStream(item.URL)
+	// Start streaming with URL refresh capability for YouTube URLs
+	if item.OriginalURL != "" {
+		// Use the new method that can refresh URLs on restart
+		err = pipeline.PlayStreamWithOriginalURL(item.URL, item.OriginalURL)
+	} else {
+		// Use the standard method for non-YouTube URLs
+		err = pipeline.PlayStream(item.URL)
+	}
 	if err != nil {
 		sendEmbedMessage(s, m.ChannelID, "❌ Error", "Failed to start audio playback.", 0xff0000)
 		queue.StopAndCleanup()

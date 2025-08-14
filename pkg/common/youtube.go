@@ -144,7 +144,17 @@ func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, 
 		duration = 0
 	}
 
-	// Then get stream URL with multiple fallback strategies and retry logic
+	// Extract a fresh stream URL
+	streamURL, err = extractFreshStreamURL(urlStr)
+	if err != nil {
+		return "", title, duration, err
+	}
+
+	return streamURL, title, duration, nil
+}
+
+// extractFreshStreamURL extracts a fresh stream URL with multiple strategies
+func extractFreshStreamURL(urlStr string) (streamURL string, err error) {
 	strategies := [][]string{
 		// Strategy 1: Best audio with format preference (updated for current YouTube)
 		{"-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio"},
@@ -188,7 +198,7 @@ func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, 
 				if len(urls) > 0 && urls[0] != "" {
 					streamURL = urls[0]
 					log.Printf("Successfully extracted stream URL using strategy %d", i+1)
-					return streamURL, title, duration, nil
+					return streamURL, nil
 				}
 			}
 		}
@@ -199,7 +209,14 @@ func GetYouTubeAudioStreamWithMetadata(urlStr string) (streamURL, title string, 
 		}
 	}
 
-	return "", title, duration, fmt.Errorf("failed to extract audio stream URL after trying all strategies with %d retries", maxRetries)
+	return "", fmt.Errorf("failed to extract audio stream URL after trying all strategies with %d retries", maxRetries)
+}
+
+// GetFreshYouTubeStreamURL extracts a fresh stream URL for immediate use
+// This function should be called just before starting playback to minimize URL expiration
+func GetFreshYouTubeStreamURL(urlStr string) (streamURL string, err error) {
+	log.Printf("Extracting fresh stream URL for immediate use: %s", urlStr)
+	return extractFreshStreamURL(urlStr)
 }
 
 // SearchYouTubeAndGetURL searches for a query on YouTube and returns the first result's URL with timeout
