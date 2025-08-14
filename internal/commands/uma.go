@@ -7,8 +7,11 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/config"
+	"github.com/latoulicious/HKTM/pkg/database/repository"
+	"github.com/latoulicious/HKTM/pkg/uma"
 	"github.com/latoulicious/HKTM/pkg/uma/handler"
 	"github.com/latoulicious/HKTM/pkg/uma/navigation"
+	"github.com/latoulicious/HKTM/pkg/uma/service"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
 	"gorm.io/gorm"
 )
@@ -17,10 +20,22 @@ var umaClient = handler.NewClient()
 var navigationManager = navigation.GetNavigationManager()
 var gametoraClient *handler.GametoraClient
 var umaDB *gorm.DB
+var umaService *uma.Service
+var characterService uma.CharacterServiceInterface
+var supportCardService uma.SupportCardServiceInterface
 
 // InitializeUmaCommands initializes the UMA commands with database for caching
 func InitializeUmaCommands(db *gorm.DB) {
 	umaDB = db
+
+	// Initialize repositories
+	characterRepo := repository.NewCharacterRepository(db)
+	supportCardRepo := repository.NewSupportCardRepository(db)
+
+	// Initialize service layer with database caching
+	umaService = uma.NewService(characterRepo, supportCardRepo, umaClient, gametoraClient)
+	characterService = service.NewCharacterService(umaService)
+	supportCardService = service.NewSupportCardService(umaService)
 }
 
 // InitializeGametoraClient initializes the global gametora client with configuration
@@ -69,8 +84,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for character...")
 
-	// Search for character
-	result := umaClient.SearchCharacter(query)
+	// Search for character using service layer with database caching
+	result, err := characterService.SearchCharacter(query)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error searching for character: %v", err))
+		return
+	}
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -106,8 +125,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 		return
 	}
 
-	// Fetch character images
-	imagesResult := umaClient.GetCharacterImages(result.Character.ID)
+	// Fetch character images using service layer with database caching
+	imagesResult, err := characterService.GetCharacterImages(result.Character.ID)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error fetching character images: %v", err))
+		return
+	}
 
 	// Create success embed with image navigation
 	embed := navigationManager.CreateCharacterEmbed(result.Character, imagesResult, 0)
@@ -152,8 +175,12 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card...")
 
-	// Search for support card
-	result := umaClient.SearchSupportCard(query)
+	// Search for support card using service layer with database caching
+	result, err := supportCardService.SearchSupportCard(query)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error searching for support card: %v", err))
+		return
+	}
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -198,8 +225,8 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	}
 
 	// Send the embed
-	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
-	if err != nil {
+	_, sendErr := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if sendErr != nil {
 		s.ChannelMessageSend(m.ChannelID, "❌ Failed to send support card information.")
 		return
 	}

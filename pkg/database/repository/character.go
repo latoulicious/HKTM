@@ -39,6 +39,14 @@ func (r *CharacterRepository) GetCharacterByName(name string) (*models.Character
 	return &character, nil
 }
 
+func (r *CharacterRepository) GetCharacterByCharacterID(characterID int) (*models.Character, error) {
+	var character models.Character
+	if err := r.db.Where("character_id = ?", characterID).First(&character).Error; err != nil {
+		return nil, err
+	}
+	return &character, nil
+}
+
 func (r *CharacterRepository) GetCharacterImagesByCharacterID(charaID int) ([]models.CharacterImage, error) {
 	var images []models.CharacterImage
 	if err := r.db.Where("character_id = ?", charaID).Find(&images).Error; err != nil {
