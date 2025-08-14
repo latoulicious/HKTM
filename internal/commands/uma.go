@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/config"
+	"github.com/latoulicious/HKTM/pkg/database/models"
 	"github.com/latoulicious/HKTM/pkg/database/repository"
 	"github.com/latoulicious/HKTM/pkg/uma"
 	"github.com/latoulicious/HKTM/pkg/uma/handler"
@@ -61,12 +62,14 @@ func UmaCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 		SupportCommand(s, m, args[1:])
 	case "skills":
 		SkillsCommand(s, m, args[1:])
+	case "sync":
+		SyncCommand(s, m, args[1:])
 	case "refresh":
 		StableRefreshCommand(s, m, args[1:])
 	case "cache":
 		CacheStatsCommand(s, m, args[1:])
 	default:
-		s.ChannelMessageSend(m.ChannelID, "❌ Unknown subcommand.\n\n**Available subcommands:**\n• `char <name>` - Search for a character\n• `support <name>` - Search for a support card (list view)\n• `skills <name>` - Get skills for a support card (Gametora API)\n• `refresh` - Refresh the Gametora API build ID\n• `cache` - Show cache statistics\n\n**Examples:**\n• `!uma char Oguri Cap`\n• `!uma support daring tact`\n• `!uma skills daring tact`\n• `!uma refresh`\n• `!uma cache`")
+		s.ChannelMessageSend(m.ChannelID, "❌ Unknown subcommand.\n\n**Available subcommands:**\n• `char <name>` - Search for a character\n• `support <name>` - Search for a support card (list view)\n• `skills <name>` - Get skills for a support card (Gametora API)\n• `sync` - Sync all data from API to database\n• `refresh` - Refresh the Gametora API build ID\n• `cache` - Show cache statistics\n\n**Examples:**\n• `!uma char Oguri Cap`\n• `!uma support daring tact`\n• `!uma skills daring tact`\n• `!uma sync`\n• `!uma refresh`\n• `!uma cache`")
 	}
 }
 
@@ -631,7 +634,64 @@ func createMultiVersionSupportCardEmbed(supportCards []shared.SupportCard) *disc
 	return embed
 }
 
+// SyncCommand syncs all data from API to database
+func SyncCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+	// Send initial message
+	msg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Starting data sync from API to database...\n\nThis may take a few minutes.")
+
+	// Create sync service
+	syncService := service.NewSyncService(umaService)
+
+	// Sync characters first
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "🔄 Syncing characters from API...")
+	if err := syncService.SyncAllCharacters(); err != nil {
+		s.ChannelMessageEdit(m.ChannelID, msg.ID, fmt.Sprintf("❌ Failed to sync characters: %v", err))
+		return
+	}
+
+	// Sync support cards
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "🔄 Syncing support cards from API...")
+	if err := syncService.SyncAllSupportCards(); err != nil {
+		s.ChannelMessageEdit(m.ChannelID, msg.ID, fmt.Sprintf("❌ Failed to sync support cards: %v", err))
+		return
+	}
+
+	// Success message
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "✅ Data sync completed successfully!\n\nAll characters and support cards have been cached in the database.\n\nFuture searches will be much faster! 🚀")
+}
+
 // CacheStatsCommand shows cache statistics
 func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	s.ChannelMessageSend(m.ChannelID, "❌ Cache functionality has been removed. All searches now use direct API calls.")
+	// Get character count
+	var characterCount int64
+	umaDB.Model(&models.Character{}).Count(&characterCount)
+
+	// Get support card count
+	var supportCardCount int64
+	umaDB.Model(&models.SupportCard{}).Count(&supportCardCount)
+
+	// Create embed
+	embed := &discordgo.MessageEmbed{
+		Title:       "📊 Database Cache Statistics",
+		Description: "Current data cached in the database",
+		Color:       0x00ff00, // Green
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "👥 Characters",
+				Value:  fmt.Sprintf("%d characters cached", characterCount),
+				Inline: true,
+			},
+			{
+				Name:   "🎴 Support Cards",
+				Value:  fmt.Sprintf("%d support cards cached", supportCardCount),
+				Inline: true,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Use !uma sync to refresh all data",
+		},
+	}
+
+	s.ChannelMessageSendEmbed(m.ChannelID, embed)
 }
