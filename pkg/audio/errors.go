@@ -9,31 +9,116 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 	"github.com/latoulicious/HKTM/pkg/database/models"
 )
 
+// DiscordNotifier implements UserNotifier for Discord notifications
+type DiscordNotifier struct {
+	session *discordgo.Session
+}
+
+// NewDiscordNotifier creates a new Discord notifier
+func NewDiscordNotifier(session *discordgo.Session) UserNotifier {
+	return &DiscordNotifier{
+		session: session,
+	}
+}
+
+// NotifyError sends a general error notification to Discord
+func (dn *DiscordNotifier) NotifyError(channelID string, errorType string, message string) error {
+	embed := &discordgo.MessageEmbed{
+		Title:       "🔧 Audio Pipeline Issue",
+		Description: fmt.Sprintf("**Error Type:** %s\n**Details:** %s", errorType, message),
+		Color:       0xFFA500, // Orange color for warnings
+		Timestamp:   time.Now().Format(time.RFC3339),
+	}
+
+	_, err := dn.session.ChannelMessageSendEmbed(channelID, embed)
+	return err
+}
+
+// NotifyRetry sends a retry notification to Discord
+func (dn *DiscordNotifier) NotifyRetry(channelID string, attempt int, maxAttempts int, nextDelay time.Duration) error {
+	embed := &discordgo.MessageEmbed{
+		Title: "🔄 Retrying Audio Stream",
+		Description: fmt.Sprintf("Attempting to recover from audio issue...\n**Attempt:** %d/%d\n**Next retry in:** %s",
+			attempt, maxAttempts, nextDelay.Round(time.Second)),
+		Color:     0x00BFFF, // Light blue for retry
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	_, err := dn.session.ChannelMessageSendEmbed(channelID, embed)
+	return err
+}
+
+// NotifyFatalError sends a fatal error notification to Discord
+func (dn *DiscordNotifier) NotifyFatalError(channelID string, errorType string, message string) error {
+	embed := &discordgo.MessageEmbed{
+		Title:       "❌ Audio Stream Failed",
+		Description: fmt.Sprintf("Unable to continue audio playback.\n**Error Type:** %s\n**Details:** %s", errorType, message),
+		Color:       0xFF0000, // Red color for fatal errors
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "You may try playing the audio again or contact support if the issue persists.",
+		},
+	}
+
+	_, err := dn.session.ChannelMessageSendEmbed(channelID, embed)
+	return err
+}
+
 // BasicErrorHandler implements the ErrorHandler interface with retry logic and centralized logging
 type BasicErrorHandler struct {
-	retryConfig *RetryConfig
-	logger      AudioLogger
-	repository  AudioRepository
-	guildID     string
+	retryConfig         *RetryConfig
+	logger              AudioLogger
+	repository          AudioRepository
+	guildID             string
+	notifier            UserNotifier
+	channelID           string // Channel to send notifications to
+	enableNotifications bool
 }
 
 // NewBasicErrorHandler creates a new BasicErrorHandler instance
 func NewBasicErrorHandler(config *RetryConfig, logger AudioLogger, repo AudioRepository, guildID string) ErrorHandler {
 	return &BasicErrorHandler{
-		retryConfig: config,
-		logger:      logger,
-		repository:  repo,
-		guildID:     guildID,
+		retryConfig:         config,
+		logger:              logger,
+		repository:          repo,
+		guildID:             guildID,
+		enableNotifications: false, // Disabled by default, can be enabled via SetNotifier
 	}
+}
+
+// NewBasicErrorHandlerWithNotifier creates a new BasicErrorHandler with user notification support
+func NewBasicErrorHandlerWithNotifier(config *RetryConfig, logger AudioLogger, repo AudioRepository, guildID string, notifier UserNotifier, channelID string) ErrorHandler {
+	return &BasicErrorHandler{
+		retryConfig:         config,
+		logger:              logger,
+		repository:          repo,
+		guildID:             guildID,
+		notifier:            notifier,
+		channelID:           channelID,
+		enableNotifications: true,
+	}
+}
+
+// SetNotifier enables user notifications by setting the notifier and channel
+func (beh *BasicErrorHandler) SetNotifier(notifier UserNotifier, channelID string) {
+	beh.notifier = notifier
+	beh.channelID = channelID
+	beh.enableNotifications = true
+}
+
+// DisableNotifications disables user notifications
+func (beh *BasicErrorHandler) DisableNotifications() {
+	beh.enableNotifications = false
 }
 
 // HandleError processes an error and determines if it should be retried and with what delay
 func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetry bool, delay time.Duration) {
-	// Log the error first
+	// Log the error first with enhanced context
 	beh.LogError(err, context)
 
 	// Check if the error is retryable
@@ -42,6 +127,20 @@ func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetr
 			"error":   err.Error(),
 			"context": context,
 		})
+
+		// Notify user of fatal error if notifications are enabled
+		if beh.enableNotifications && beh.notifier != nil && beh.channelID != "" {
+			errorType := beh.classifyErrorType(err)
+			userMessage := beh.createUserFriendlyErrorMessage(err, errorType)
+			if notifyErr := beh.notifier.NotifyFatalError(beh.channelID, errorType, userMessage); notifyErr != nil {
+				beh.logger.Warn("Failed to send fatal error notification to user", map[string]interface{}{
+					"notification_error": notifyErr.Error(),
+					"original_error":     err.Error(),
+					"channel_id":         beh.channelID,
+				})
+			}
+		}
+
 		return false, 0
 	}
 
@@ -56,20 +155,30 @@ func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetr
 		"retry_delay": delay.String(),
 	})
 
+	// Notify user of retry attempt if notifications are enabled
+	if beh.enableNotifications && beh.notifier != nil && beh.channelID != "" {
+		if notifyErr := beh.notifier.NotifyRetry(beh.channelID, 1, beh.retryConfig.MaxRetries, delay); notifyErr != nil {
+			beh.logger.Warn("Failed to send retry notification to user", map[string]interface{}{
+				"notification_error": notifyErr.Error(),
+				"original_error":     err.Error(),
+				"channel_id":         beh.channelID,
+			})
+		}
+	}
+
 	return true, delay
 }
 
-// LogError logs an error to both console and database
+// LogError logs an error to both console and database with enhanced context and debugging information
 func (beh *BasicErrorHandler) LogError(err error, context string) {
 	// Classify the error type for database storage
 	errorType := beh.classifyErrorType(err)
 
-	// Log to console via AudioLogger
-	beh.logger.Error("Audio pipeline error occurred", err, map[string]interface{}{
-		"context":    context,
-		"error_type": errorType,
-		"guild_id":   beh.guildID,
-	})
+	// Create enhanced debugging context
+	debugContext := beh.createDebugContext(err, context, errorType)
+
+	// Log to console via AudioLogger with enhanced context
+	beh.logger.Error("Audio pipeline error occurred", err, debugContext)
 
 	// Save to database if repository is available
 	if beh.repository != nil {
@@ -78,7 +187,7 @@ func (beh *BasicErrorHandler) LogError(err error, context string) {
 			GuildID:   beh.guildID,
 			ErrorType: errorType,
 			ErrorMsg:  err.Error(),
-			Context:   context,
+			Context:   beh.formatContextForDatabase(context, debugContext),
 			Timestamp: time.Now(),
 			Resolved:  false,
 		}
@@ -88,6 +197,13 @@ func (beh *BasicErrorHandler) LogError(err error, context string) {
 				"save_error":     saveErr.Error(),
 				"original_error": err.Error(),
 				"context":        context,
+				"error_type":     errorType,
+			})
+		} else {
+			beh.logger.Debug("Error successfully saved to database", map[string]interface{}{
+				"error_id":   audioError.ID.String(),
+				"error_type": errorType,
+				"context":    context,
 			})
 		}
 	}
@@ -317,6 +433,7 @@ func isFFmpegRetryableError(errorStr string) bool {
 		"protocol error",
 		"server returned 5", // 5xx HTTP errors
 		"timeout",
+		"ffmpeg failed", // General FFmpeg failures can be retryable
 	}
 
 	for _, pattern := range retryablePatterns {
@@ -412,4 +529,250 @@ func IsMaxRetriesError(err error) bool {
 // CreateMaxRetriesError creates an error indicating max retries were exceeded
 func CreateMaxRetriesError(lastErr error, attempts int) error {
 	return fmt.Errorf("max retries exceeded after %d attempts, last error: %w", attempts, lastErr)
+}
+
+// createDebugContext creates enhanced debugging context for error logging
+func (beh *BasicErrorHandler) createDebugContext(err error, context string, errorType string) map[string]interface{} {
+	debugContext := map[string]interface{}{
+		"context":     context,
+		"error_type":  errorType,
+		"guild_id":    beh.guildID,
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"retryable":   beh.IsRetryableError(err),
+		"max_retries": beh.retryConfig.MaxRetries,
+		"base_delay":  beh.retryConfig.BaseDelay.String(),
+		"max_delay":   beh.retryConfig.MaxDelay.String(),
+	}
+
+	// Add error-specific debugging information
+	switch errorType {
+	case "network":
+		debugContext["network_error_details"] = beh.extractNetworkErrorDetails(err)
+	case "process":
+		debugContext["process_error_details"] = beh.extractProcessErrorDetails(err)
+	case "yt-dlp":
+		debugContext["ytdlp_error_details"] = beh.extractYtDlpErrorDetails(err)
+	case "ffmpeg":
+		debugContext["ffmpeg_error_details"] = beh.extractFFmpegErrorDetails(err)
+	case "discord":
+		debugContext["discord_error_details"] = beh.extractDiscordErrorDetails(err)
+	case "filesystem":
+		debugContext["filesystem_error_details"] = beh.extractFilesystemErrorDetails(err)
+	case "encoding":
+		debugContext["encoding_error_details"] = beh.extractEncodingErrorDetails(err)
+	}
+
+	// Add system context if available
+	if beh.channelID != "" {
+		debugContext["notification_channel"] = beh.channelID
+	}
+	debugContext["notifications_enabled"] = beh.enableNotifications
+
+	return debugContext
+}
+
+// formatContextForDatabase formats the context and debug information for database storage
+func (beh *BasicErrorHandler) formatContextForDatabase(originalContext string, debugContext map[string]interface{}) string {
+	contextParts := []string{originalContext}
+
+	// Add key debugging information to the context string
+	if errorType, ok := debugContext["error_type"].(string); ok {
+		contextParts = append(contextParts, fmt.Sprintf("type=%s", errorType))
+	}
+
+	if retryable, ok := debugContext["retryable"].(bool); ok {
+		contextParts = append(contextParts, fmt.Sprintf("retryable=%t", retryable))
+	}
+
+	if timestamp, ok := debugContext["timestamp"].(string); ok {
+		contextParts = append(contextParts, fmt.Sprintf("timestamp=%s", timestamp))
+	}
+
+	return strings.Join(contextParts, "; ")
+}
+
+// createUserFriendlyErrorMessage creates a user-friendly error message for Discord notifications
+func (beh *BasicErrorHandler) createUserFriendlyErrorMessage(err error, errorType string) string {
+	switch errorType {
+	case "network":
+		return "Network connection issue. This might be temporary - please try again in a few moments."
+	case "yt-dlp":
+		return "Unable to download audio from the provided URL. The video might be unavailable or restricted."
+	case "ffmpeg":
+		return "Audio processing failed. This might be due to an unsupported audio format or temporary issue."
+	case "discord":
+		return "Discord connection issue. The bot might have lost connection to the voice channel."
+	case "process":
+		return "Audio processing system encountered an issue. This is usually temporary."
+	case "filesystem":
+		return "File system issue encountered. This might be due to insufficient disk space or permissions."
+	case "encoding":
+		return "Audio encoding failed. This might be due to corrupted audio data or system resources."
+	case "configuration":
+		return "Configuration issue detected. Please contact the bot administrator."
+	default:
+		// For unknown errors, provide a generic but helpful message
+		errorStr := strings.ToLower(err.Error())
+		if strings.Contains(errorStr, "timeout") {
+			return "Request timed out. This might be due to slow network or server issues."
+		}
+		if strings.Contains(errorStr, "not found") || strings.Contains(errorStr, "404") {
+			return "The requested audio content was not found or is no longer available."
+		}
+		if strings.Contains(errorStr, "forbidden") || strings.Contains(errorStr, "403") {
+			return "Access to the audio content is restricted or forbidden."
+		}
+		if strings.Contains(errorStr, "rate limit") {
+			return "Too many requests. Please wait a moment before trying again."
+		}
+		return "An unexpected issue occurred while processing the audio. Please try again."
+	}
+}
+
+// Error detail extraction methods for enhanced debugging
+
+func (beh *BasicErrorHandler) extractNetworkErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+
+	if netErr, ok := err.(net.Error); ok {
+		details["timeout"] = netErr.Timeout()
+		details["temporary"] = netErr.Temporary()
+	}
+
+	errorStr := strings.ToLower(err.Error())
+	details["connection_refused"] = strings.Contains(errorStr, "connection refused")
+	details["connection_reset"] = strings.Contains(errorStr, "connection reset")
+	details["timeout_detected"] = strings.Contains(errorStr, "timeout")
+	details["dns_issue"] = strings.Contains(errorStr, "no such host") || strings.Contains(errorStr, "name resolution")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractProcessErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		details["exit_code"] = exitErr.ExitCode()
+		details["stderr"] = string(exitErr.Stderr)
+	}
+
+	if errno, ok := err.(syscall.Errno); ok {
+		details["syscall_errno"] = int(errno)
+		details["errno_name"] = errno.Error()
+	}
+
+	errorStr := strings.ToLower(err.Error())
+	details["killed"] = strings.Contains(errorStr, "killed")
+	details["terminated"] = strings.Contains(errorStr, "terminated")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractYtDlpErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["http_error"] = strings.Contains(errorStr, "http error")
+	details["rate_limited"] = strings.Contains(errorStr, "429") || strings.Contains(errorStr, "rate limit")
+	details["unavailable"] = strings.Contains(errorStr, "unavailable") || strings.Contains(errorStr, "not available")
+	details["private_video"] = strings.Contains(errorStr, "private") || strings.Contains(errorStr, "forbidden")
+	details["geo_blocked"] = strings.Contains(errorStr, "geo") || strings.Contains(errorStr, "region")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractFFmpegErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["invalid_data"] = strings.Contains(errorStr, "invalid data")
+	details["protocol_error"] = strings.Contains(errorStr, "protocol")
+	details["format_error"] = strings.Contains(errorStr, "format")
+	details["codec_error"] = strings.Contains(errorStr, "codec")
+	details["stream_error"] = strings.Contains(errorStr, "stream")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractDiscordErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["websocket_error"] = strings.Contains(errorStr, "websocket")
+	details["rate_limited"] = strings.Contains(errorStr, "rate limit")
+	details["voice_error"] = strings.Contains(errorStr, "voice")
+	details["connection_closed"] = strings.Contains(errorStr, "close")
+	details["api_error"] = strings.Contains(errorStr, "api")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractFilesystemErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["permission_denied"] = strings.Contains(errorStr, "permission denied")
+	details["no_space"] = strings.Contains(errorStr, "no space") || strings.Contains(errorStr, "disk full")
+	details["file_not_found"] = strings.Contains(errorStr, "no such file")
+	details["io_error"] = strings.Contains(errorStr, "i/o error")
+
+	return details
+}
+
+func (beh *BasicErrorHandler) extractEncodingErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["opus_error"] = strings.Contains(errorStr, "opus")
+	details["pcm_error"] = strings.Contains(errorStr, "pcm")
+	details["frame_size_error"] = strings.Contains(errorStr, "frame size")
+	details["sample_rate_error"] = strings.Contains(errorStr, "sample rate")
+
+	return details
+}
+
+// NotifyRetryAttempt sends a notification for a specific retry attempt
+func (beh *BasicErrorHandler) NotifyRetryAttempt(attempt int, err error, delay time.Duration) {
+	if !beh.enableNotifications || beh.notifier == nil || beh.channelID == "" {
+		return
+	}
+
+	if notifyErr := beh.notifier.NotifyRetry(beh.channelID, attempt, beh.retryConfig.MaxRetries, delay); notifyErr != nil {
+		beh.logger.Warn("Failed to send retry attempt notification to user", map[string]interface{}{
+			"notification_error": notifyErr.Error(),
+			"retry_attempt":      attempt,
+			"original_error":     err.Error(),
+			"channel_id":         beh.channelID,
+		})
+	}
+}
+
+// NotifyMaxRetriesExceeded sends a notification when max retries are exceeded
+func (beh *BasicErrorHandler) NotifyMaxRetriesExceeded(finalErr error, attempts int) {
+	if !beh.enableNotifications || beh.notifier == nil || beh.channelID == "" {
+		return
+	}
+
+	errorType := beh.classifyErrorType(finalErr)
+	userMessage := fmt.Sprintf("%s\n\nTried %d times but couldn't recover. You may try playing the audio again.",
+		beh.createUserFriendlyErrorMessage(finalErr, errorType), attempts)
+
+	if notifyErr := beh.notifier.NotifyFatalError(beh.channelID, errorType, userMessage); notifyErr != nil {
+		beh.logger.Warn("Failed to send max retries exceeded notification to user", map[string]interface{}{
+			"notification_error": notifyErr.Error(),
+			"final_error":        finalErr.Error(),
+			"attempts":           attempts,
+			"channel_id":         beh.channelID,
+		})
+	}
+}
+
+// GetChannelID returns the current notification channel ID
+func (beh *BasicErrorHandler) GetChannelID() string {
+	return beh.channelID
+}
+
+// IsNotificationEnabled returns whether notifications are currently enabled
+func (beh *BasicErrorHandler) IsNotificationEnabled() bool {
+	return beh.enableNotifications && beh.notifier != nil && beh.channelID != ""
 }

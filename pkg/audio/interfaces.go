@@ -46,6 +46,19 @@ type ErrorHandler interface {
 	GetRetryDelay(attempt int) time.Duration
 	GetMaxRetries() int
 	ShouldRetryAfterAttempts(attempts int, err error) bool
+
+	// User notification methods
+	SetNotifier(notifier UserNotifier, channelID string)
+	DisableNotifications()
+	NotifyRetryAttempt(attempt int, err error, delay time.Duration)
+	NotifyMaxRetriesExceeded(finalErr error, attempts int)
+}
+
+// UserNotifier defines the interface for sending notifications to Discord users
+type UserNotifier interface {
+	NotifyError(channelID string, errorType string, message string) error
+	NotifyRetry(channelID string, attempt int, maxAttempts int, nextDelay time.Duration) error
+	NotifyFatalError(channelID string, errorType string, message string) error
 }
 
 // AudioLogger provides centralized logging with database persistence
