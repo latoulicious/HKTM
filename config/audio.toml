@@ -1,0 +1,27 @@
+[pipeline]
+retry_count = 3
+timeout_seconds = 30
+log_level = "info"
+ffmpeg_options = ["-reconnect", "1", "-reconnect_delay_max", "5"]
+
+[ffmpeg]
+binary_path = "ffmpeg"
+audio_format = "s16le"
+sample_rate = 48000
+channels = 2
+custom_args = ["-reconnect", "1", "-reconnect_delay_max", "5"]
+
+[opus]
+bitrate = 128000
+frame_size = 960
+
+[retry]
+max_retries = 3
+base_delay = "2s"
+max_delay = "30s"
+multiplier = 2.0
+
+[logger]
+level = "info"
+format = "json"
+save_to_db = true
