@@ -22,6 +22,10 @@ func RunMigration(db *gorm.DB) error {
 		&models.Character{},
 		&models.CharacterImage{},
 		&models.SupportCard{},
+		&models.AudioError{},
+		&models.AudioMetric{},
+		&models.AudioLog{},
+		&models.QueueTimeout{},
 	); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
