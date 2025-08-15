@@ -22,6 +22,8 @@ type StreamProcessor interface {
 	Stop() error
 	IsRunning() bool
 	Restart(url string) error
+	WaitForExit(timeout time.Duration) error
+	GetProcessInfo() map[string]interface{}
 }
 
 // AudioEncoder handles Opus encoding for Discord compatibility

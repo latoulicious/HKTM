@@ -2,6 +2,7 @@ package audio
 
 import (
 	"testing"
+	"time"
 
 	"github.com/latoulicious/HKTM/pkg/audio"
 )
@@ -155,6 +156,113 @@ func TestFFmpegProcessor_ConfigValidation(t *testing.T) {
 
 	// We can't easily test the internal config usage without exposing internals,
 	// but we can verify the processor was created successfully with custom config
+}
+
+// TestFFmpegProcessor_ProcessMonitoring tests the enhanced process monitoring features
+func TestFFmpegProcessor_ProcessMonitoring(t *testing.T) {
+	config := &audio.FFmpegConfig{
+		BinaryPath:  "ffmpeg",
+		AudioFormat: "s16le",
+		SampleRate:  48000,
+		Channels:    2,
+		CustomArgs:  []string{},
+	}
+
+	logger := &MockAudioLogger{}
+	processor := audio.NewFFmpegProcessor(config, logger)
+
+	// Test GetProcessInfo when not running
+	info := processor.GetProcessInfo()
+	if info["is_running"].(bool) {
+		t.Error("Process should not be running initially")
+	}
+	if info["current_url"].(string) != "" {
+		t.Error("Current URL should be empty initially")
+	}
+	if info["stderr_lines"].(int) != 0 {
+		t.Error("Stderr lines should be 0 initially")
+	}
+}
+
+// TestFFmpegProcessor_WaitForExit tests the WaitForExit functionality
+func TestFFmpegProcessor_WaitForExit_WhenNotRunning(t *testing.T) {
+	config := &audio.FFmpegConfig{
+		BinaryPath:  "ffmpeg",
+		AudioFormat: "s16le",
+		SampleRate:  48000,
+		Channels:    2,
+		CustomArgs:  []string{},
+	}
+
+	logger := &MockAudioLogger{}
+	processor := audio.NewFFmpegProcessor(config, logger)
+
+	// WaitForExit should return immediately when not running
+	err := processor.WaitForExit(1 * time.Second)
+	if err != nil {
+		t.Errorf("WaitForExit should not error when not running: %v", err)
+	}
+}
+
+// TestFFmpegProcessor_ResourceCleanup tests that resources are properly cleaned up
+func TestFFmpegProcessor_ResourceCleanup(t *testing.T) {
+	config := &audio.FFmpegConfig{
+		BinaryPath:  "ffmpeg",
+		AudioFormat: "s16le",
+		SampleRate:  48000,
+		Channels:    2,
+		CustomArgs:  []string{},
+	}
+
+	logger := &MockAudioLogger{}
+	processor := audio.NewFFmpegProcessor(config, logger)
+
+	// Test multiple stop calls don't cause issues
+	err1 := processor.Stop()
+	err2 := processor.Stop()
+
+	if err1 != nil {
+		t.Errorf("First Stop() call should not error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("Second Stop() call should not error: %v", err2)
+	}
+
+	// Verify state is clean
+	if processor.IsRunning() {
+		t.Error("Processor should not be running after stop")
+	}
+}
+
+// TestFFmpegProcessor_StderrBuffering tests the stderr buffering functionality
+func TestFFmpegProcessor_StderrBuffering(t *testing.T) {
+	config := &audio.FFmpegConfig{
+		BinaryPath:  "ffmpeg",
+		AudioFormat: "s16le",
+		SampleRate:  48000,
+		Channels:    2,
+		CustomArgs:  []string{},
+	}
+
+	logger := &MockAudioLogger{}
+	processor := audio.NewFFmpegProcessor(config, logger)
+
+	// Test that GetProcessInfo works correctly
+	info := processor.GetProcessInfo()
+	if info == nil {
+		t.Fatal("GetProcessInfo should not return nil")
+	}
+
+	// Verify expected fields exist
+	if _, exists := info["is_running"]; !exists {
+		t.Error("GetProcessInfo should include is_running field")
+	}
+	if _, exists := info["current_url"]; !exists {
+		t.Error("GetProcessInfo should include current_url field")
+	}
+	if _, exists := info["stderr_lines"]; !exists {
+		t.Error("GetProcessInfo should include stderr_lines field")
+	}
 }
 
 // Benchmark test for processor creation

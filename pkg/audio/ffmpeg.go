@@ -13,21 +13,25 @@ import (
 
 // FFmpegProcessor implements the StreamProcessor interface for FFmpeg operations
 type FFmpegProcessor struct {
-	config     *FFmpegConfig
-	cmd        *exec.Cmd
-	outputPipe io.ReadCloser
-	errorPipe  io.ReadCloser
-	isRunning  bool
-	currentURL string
-	mu         sync.RWMutex
-	logger     AudioLogger
+	config         *FFmpegConfig
+	cmd            *exec.Cmd
+	outputPipe     io.ReadCloser
+	errorPipe      io.ReadCloser
+	isRunning      bool
+	currentURL     string
+	mu             sync.RWMutex
+	logger         AudioLogger
+	processExited  chan struct{} // Channel to signal when process has exited
+	stderrBuffer   []string      // Buffer to store recent stderr lines for debugging
+	maxStderrLines int           // Maximum number of stderr lines to keep
 }
 
 // NewFFmpegProcessor creates a new FFmpegProcessor instance
 func NewFFmpegProcessor(config *FFmpegConfig, logger AudioLogger) StreamProcessor {
 	return &FFmpegProcessor{
-		config: config,
-		logger: logger,
+		config:         config,
+		logger:         logger,
+		maxStderrLines: 50, // Keep last 50 stderr lines for debugging
 	}
 }
 
@@ -97,6 +101,8 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	}
 
 	fp.isRunning = true
+	fp.processExited = make(chan struct{})
+	fp.stderrBuffer = make([]string, 0, fp.maxStderrLines)
 
 	// Start monitoring stderr in a separate goroutine
 	go fp.monitorStderr()
@@ -130,7 +136,7 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		"url": fp.currentURL,
 	})
 
-	// Close pipes first
+	// Close pipes first to signal the process to stop
 	if fp.outputPipe != nil {
 		fp.outputPipe.Close()
 		fp.outputPipe = nil
@@ -159,10 +165,14 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		select {
 		case <-done:
 			// Process terminated gracefully
+			fp.logger.Debug("FFmpeg process terminated gracefully", map[string]interface{}{
+				"pid": fp.cmd.Process.Pid,
+			})
 		case <-time.After(5 * time.Second):
 			// Force kill if graceful shutdown takes too long
 			fp.logger.Warn("FFmpeg process did not terminate gracefully, force killing", map[string]interface{}{
-				"pid": fp.cmd.Process.Pid,
+				"pid":           fp.cmd.Process.Pid,
+				"recent_stderr": fp.getRecentStderr(),
 			})
 			if err := syscall.Kill(-fp.cmd.Process.Pid, syscall.SIGKILL); err != nil {
 				fp.logger.Error("Failed to force kill process group", err, map[string]interface{}{
@@ -173,9 +183,16 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		}
 	}
 
+	// Signal that the process has exited
+	if fp.processExited != nil {
+		close(fp.processExited)
+		fp.processExited = nil
+	}
+
 	fp.isRunning = false
 	fp.cmd = nil
 	fp.currentURL = ""
+	fp.stderrBuffer = nil
 
 	fp.logger.Info("FFmpeg process stopped", nil)
 	return nil
@@ -253,9 +270,26 @@ func (fp *FFmpegProcessor) monitorStderr() {
 		return
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			fp.logger.Error("Panic in stderr monitor", fmt.Errorf("panic: %v", r), map[string]interface{}{
+				"url": fp.currentURL,
+			})
+		}
+	}()
+
 	scanner := bufio.NewScanner(fp.errorPipe)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// Add to stderr buffer for debugging (thread-safe)
+		fp.mu.Lock()
+		if len(fp.stderrBuffer) >= fp.maxStderrLines {
+			// Remove oldest line
+			fp.stderrBuffer = fp.stderrBuffer[1:]
+		}
+		fp.stderrBuffer = append(fp.stderrBuffer, line)
+		fp.mu.Unlock()
 
 		// Log FFmpeg output for debugging
 		fp.logger.Debug("FFmpeg stderr", map[string]interface{}{
@@ -270,13 +304,26 @@ func (fp *FFmpegProcessor) monitorStderr() {
 				"url":   fp.currentURL,
 			})
 		}
+
+		// Check for critical error patterns that might indicate process failure
+		if fp.isCriticalError(line) {
+			fp.logger.Error("FFmpeg critical error detected", fmt.Errorf("critical error: %s", line), map[string]interface{}{
+				"error": line,
+				"url":   fp.currentURL,
+			})
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		fp.logger.Error("Error reading FFmpeg stderr", err, map[string]interface{}{
-			"url": fp.currentURL,
+			"url":           fp.currentURL,
+			"recent_stderr": fp.getRecentStderr(),
 		})
 	}
+
+	fp.logger.Debug("FFmpeg stderr monitoring stopped", map[string]interface{}{
+		"url": fp.currentURL,
+	})
 }
 
 // monitorProcess monitors the FFmpeg process and handles unexpected exits
@@ -284,6 +331,14 @@ func (fp *FFmpegProcessor) monitorProcess() {
 	if fp.cmd == nil {
 		return
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			fp.logger.Error("Panic in process monitor", fmt.Errorf("panic: %v", r), map[string]interface{}{
+				"url": fp.currentURL,
+			})
+		}
+	}()
 
 	// Wait for the process to exit
 	err := fp.cmd.Wait()
@@ -296,27 +351,30 @@ func (fp *FFmpegProcessor) monitorProcess() {
 		fp.isRunning = false
 
 		if err != nil {
+			exitCode := -1
+			if fp.cmd.ProcessState != nil {
+				exitCode = fp.cmd.ProcessState.ExitCode()
+			}
+
 			fp.logger.Error("FFmpeg process exited unexpectedly", err, map[string]interface{}{
-				"url":       fp.currentURL,
-				"exit_code": fp.cmd.ProcessState.ExitCode(),
+				"url":           fp.currentURL,
+				"exit_code":     exitCode,
+				"recent_stderr": fp.getRecentStderr(),
 			})
 		} else {
-			fp.logger.Info("FFmpeg process completed", map[string]interface{}{
+			fp.logger.Info("FFmpeg process completed normally", map[string]interface{}{
 				"url": fp.currentURL,
 			})
 		}
 
-		// Clean up
-		fp.cmd = nil
-		fp.currentURL = ""
-		if fp.outputPipe != nil {
-			fp.outputPipe.Close()
-			fp.outputPipe = nil
-		}
-		if fp.errorPipe != nil {
-			fp.errorPipe.Close()
-			fp.errorPipe = nil
-		}
+		// Clean up resources
+		fp.cleanupResources()
+	}
+
+	// Signal that the process has exited
+	if fp.processExited != nil {
+		close(fp.processExited)
+		fp.processExited = nil
 	}
 }
 
@@ -344,4 +402,104 @@ func (fp *FFmpegProcessor) isErrorLine(line string) bool {
 		}
 	}
 	return false
+}
+
+// isCriticalError checks if a stderr line indicates a critical error that might cause process failure
+func (fp *FFmpegProcessor) isCriticalError(line string) bool {
+	criticalPatterns := []string{
+		"Segmentation fault",
+		"segmentation fault",
+		"Fatal error",
+		"fatal error",
+		"Assertion failed",
+		"assertion failed",
+		"Out of memory",
+		"out of memory",
+		"Killed",
+		"killed",
+		"Aborted",
+		"aborted",
+	}
+
+	for _, pattern := range criticalPatterns {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// getRecentStderr returns the recent stderr lines for debugging (thread-safe)
+func (fp *FFmpegProcessor) getRecentStderr() []string {
+	fp.mu.RLock()
+	defer fp.mu.RUnlock()
+
+	if fp.stderrBuffer == nil {
+		return nil
+	}
+
+	// Return a copy to avoid race conditions
+	result := make([]string, len(fp.stderrBuffer))
+	copy(result, fp.stderrBuffer)
+	return result
+}
+
+// cleanupResources cleans up all process-related resources
+func (fp *FFmpegProcessor) cleanupResources() {
+	// Clean up pipes
+	if fp.outputPipe != nil {
+		fp.outputPipe.Close()
+		fp.outputPipe = nil
+	}
+	if fp.errorPipe != nil {
+		fp.errorPipe.Close()
+		fp.errorPipe = nil
+	}
+
+	// Clear process reference
+	fp.cmd = nil
+	fp.currentURL = ""
+	fp.stderrBuffer = nil
+}
+
+// WaitForExit waits for the process to exit with a timeout
+// This is useful for testing and ensuring proper cleanup
+func (fp *FFmpegProcessor) WaitForExit(timeout time.Duration) error {
+	fp.mu.RLock()
+	processExited := fp.processExited
+	isRunning := fp.isRunning
+	fp.mu.RUnlock()
+
+	if !isRunning {
+		return nil // Already stopped
+	}
+
+	if processExited == nil {
+		return fmt.Errorf("process exit channel not initialized")
+	}
+
+	select {
+	case <-processExited:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout waiting for process to exit")
+	}
+}
+
+// GetProcessInfo returns information about the current process for monitoring
+func (fp *FFmpegProcessor) GetProcessInfo() map[string]interface{} {
+	fp.mu.RLock()
+	defer fp.mu.RUnlock()
+
+	info := map[string]interface{}{
+		"is_running":   fp.isRunning,
+		"current_url":  fp.currentURL,
+		"stderr_lines": len(fp.stderrBuffer),
+	}
+
+	if fp.cmd != nil && fp.cmd.Process != nil {
+		info["pid"] = fp.cmd.Process.Pid
+	}
+
+	return info
 }
