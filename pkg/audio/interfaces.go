@@ -43,6 +43,9 @@ type ErrorHandler interface {
 	HandleError(err error, context string) (shouldRetry bool, delay time.Duration)
 	LogError(err error, context string)
 	IsRetryableError(err error) bool
+	GetRetryDelay(attempt int) time.Duration
+	GetMaxRetries() int
+	ShouldRetryAfterAttempts(attempts int, err error) bool
 }
 
 // AudioLogger provides centralized logging with database persistence
