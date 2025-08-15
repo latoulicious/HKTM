@@ -3,6 +3,7 @@ package audio
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"layeh.com/gopus"
 )
@@ -61,6 +62,7 @@ func (op *OpusProcessor) Initialize() error {
 }
 
 // Encode encodes PCM audio data to Opus format for Discord streaming
+// Implements frame-based encoding with proper Discord timing and error handling
 func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 	op.mu.RLock()
 	defer op.mu.RUnlock()
@@ -77,17 +79,39 @@ func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 		return nil, fmt.Errorf("empty PCM data provided")
 	}
 
-	// Validate frame size matches configuration
-	// Discord expects specific frame sizes (960 samples for 20ms at 48kHz)
-	expectedFrameSize := op.config.FrameSize * 2 // stereo, so 2 channels
+	// Discord requires specific frame sizes for proper timing
+	// Frame size is per channel, so for stereo we need frameSize * channels samples
+	const channels = 2 // Discord always uses stereo
+	expectedFrameSize := op.config.FrameSize * channels
+
 	if len(pcmData) != expectedFrameSize {
-		return nil, fmt.Errorf("invalid PCM frame size: expected %d samples, got %d", expectedFrameSize, len(pcmData))
+		return nil, fmt.Errorf("invalid PCM frame size: expected %d samples (%d per channel * %d channels), got %d",
+			expectedFrameSize, op.config.FrameSize, channels, len(pcmData))
 	}
 
-	// Encode the PCM data to Opus
+	// Validate frame size is appropriate for Discord (20ms frames at 48kHz)
+	// 48000 Hz * 0.02s = 960 samples per channel
+	if op.config.FrameSize != 960 {
+		return nil, fmt.Errorf("invalid frame size for Discord: expected 960 samples per channel, got %d", op.config.FrameSize)
+	}
+
+	// Encode the PCM data to Opus with proper error handling
+	// The maxDataBytes parameter (4000) provides enough space for worst-case Opus frame
 	opusData, err := op.encoder.Encode(pcmData, op.config.FrameSize, 4000)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode PCM to opus: %w", err)
+		// Provide detailed error context for debugging
+		return nil, fmt.Errorf("failed to encode PCM to Opus (frame_size=%d, samples=%d, bitrate=%d): %w",
+			op.config.FrameSize, len(pcmData), op.config.Bitrate, err)
+	}
+
+	// Validate that we got a reasonable Opus frame
+	if len(opusData) == 0 {
+		return nil, fmt.Errorf("opus encoder returned empty frame")
+	}
+
+	// Discord expects Opus frames to be reasonable size (typically 20-1000 bytes)
+	if len(opusData) > 4000 {
+		return nil, fmt.Errorf("opus frame too large: %d bytes (max 4000)", len(opusData))
 	}
 
 	return opusData, nil
@@ -124,4 +148,58 @@ func (op *OpusProcessor) IsInitialized() bool {
 // GetConfig returns the current Opus configuration
 func (op *OpusProcessor) GetConfig() *OpusConfig {
 	return op.config
+}
+
+// EncodeFrame encodes a single PCM frame with Discord-specific validation
+// This method ensures proper frame timing for Discord streaming (20ms frames)
+func (op *OpusProcessor) EncodeFrame(pcmFrame []int16) ([]byte, error) {
+	// Use the main Encode method with additional frame validation
+	return op.Encode(pcmFrame)
+}
+
+// GetFrameSize returns the expected PCM frame size in samples (total for all channels)
+func (op *OpusProcessor) GetFrameSize() int {
+	const channels = 2 // Discord always uses stereo
+	return op.config.FrameSize * channels
+}
+
+// GetFrameDuration returns the duration of each frame for timing calculations
+func (op *OpusProcessor) GetFrameDuration() time.Duration {
+	// Discord uses 20ms frames (960 samples at 48kHz)
+	return 20 * time.Millisecond
+}
+
+// ValidateFrameSize validates that the provided PCM data matches Discord requirements
+func (op *OpusProcessor) ValidateFrameSize(pcmData []int16) error {
+	expectedSize := op.GetFrameSize()
+	if len(pcmData) != expectedSize {
+		return fmt.Errorf("invalid frame size: expected %d samples, got %d", expectedSize, len(pcmData))
+	}
+	return nil
+}
+
+// PrepareForStreaming validates the encoder configuration for Discord streaming
+func (op *OpusProcessor) PrepareForStreaming() error {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+
+	if op.encoder == nil {
+		return fmt.Errorf("opus encoder not initialized - call Initialize() first")
+	}
+
+	if op.closed {
+		return fmt.Errorf("opus encoder is closed")
+	}
+
+	// Validate configuration for Discord compatibility
+	if op.config.FrameSize != 960 {
+		return fmt.Errorf("invalid frame size for Discord streaming: expected 960, got %d", op.config.FrameSize)
+	}
+
+	// Validate bitrate is reasonable for Discord
+	if op.config.Bitrate < 8000 || op.config.Bitrate > 512000 {
+		return fmt.Errorf("invalid bitrate for Discord: %d (should be between 8000-512000)", op.config.Bitrate)
+	}
+
+	return nil
 }

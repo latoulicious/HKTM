@@ -31,6 +31,11 @@ type AudioEncoder interface {
 	Initialize() error
 	Encode(pcmData []int16) ([]byte, error)
 	Close() error
+	EncodeFrame(pcmFrame []int16) ([]byte, error)
+	GetFrameSize() int
+	GetFrameDuration() time.Duration
+	ValidateFrameSize(pcmData []int16) error
+	PrepareForStreaming() error
 }
 
 // ErrorHandler manages error handling and retry logic
