@@ -5,6 +5,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/latoulicious/HKTM/pkg/database/models"
 )
 
 // ValidateURL validates that a URL is not empty and has a basic valid format
@@ -148,4 +151,44 @@ func SanitizeURL(urlStr string) string {
 	}
 
 	return sanitized
+}
+
+// CreateAudioMetric creates a new AudioMetric with common fields populated
+// Used by Metrics, Logger, ErrorHandler for consistent metric creation
+func CreateAudioMetric(guildID, metricType string, value float64) *models.AudioMetric {
+	return &models.AudioMetric{
+		ID:         uuid.New(),
+		GuildID:    guildID,
+		MetricType: metricType,
+		Value:      value,
+		Timestamp:  time.Now(),
+	}
+}
+
+// CreateAudioLog creates a new AudioLog with common fields populated
+// Used by Logger, ErrorHandler for consistent log creation
+func CreateAudioLog(guildID, level, message, errorMsg string, fields map[string]interface{}) *models.AudioLog {
+	return &models.AudioLog{
+		ID:        uuid.New(),
+		GuildID:   guildID,
+		Level:     level,
+		Message:   message,
+		Error:     errorMsg,
+		Fields:    fields,
+		Timestamp: time.Now(),
+	}
+}
+
+// CreateAudioError creates a new AudioError with common fields populated
+// Used by ErrorHandler, Metrics for consistent error creation
+func CreateAudioError(guildID, errorType, errorMsg, context string) *models.AudioError {
+	return &models.AudioError{
+		ID:        uuid.New(),
+		GuildID:   guildID,
+		ErrorType: errorType,
+		ErrorMsg:  errorMsg,
+		Context:   context,
+		Timestamp: time.Now(),
+		Resolved:  false,
+	}
 }
