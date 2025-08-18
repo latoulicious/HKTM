@@ -193,160 +193,343 @@ func (c *AudioPipelineController) GetStatus() PipelineStatus {
 }
 
 // executePlayback handles the actual playback execution
+// This method coordinates all components in the correct order:
+// 1. Initialize state and logging context
+// 2. Initialize audio encoder
+// 3. Start stream processor
+// 4. Record metrics
+// 5. Start audio streaming loop
 func (c *AudioPipelineController) executePlayback(url string, voiceConn *discordgo.VoiceConnection) error {
+	// Set up initial state and context
 	c.mu.Lock()
 	c.state = StateStarting
 	c.currentURL = url
 	c.voiceConn = voiceConn
 	c.startTime = time.Now()
 	c.lastError = nil
+	c.errorCount = 0 // Reset error count for new playback
+	guildID := voiceConn.GuildID
 	c.mu.Unlock()
 
-	c.logger.Info("Starting playback", CreateContextFields("", "", url))
+	// Create enriched logging context for this playback session
+	contextFields := CreateContextFieldsWithComponent(guildID, "", url, "pipeline")
+	c.logger.Info("Starting playback execution", contextFields)
 
-	// Record startup time
+	// Record startup time measurement
 	startTime := time.Now()
 
-	// Initialize audio encoder
+	// Step 1: Initialize audio encoder first (required for streaming)
+	c.logger.Debug("Initializing audio encoder", contextFields)
 	if err := c.audioEncoder.Initialize(); err != nil {
+		c.logger.Error("Audio encoder initialization failed", err, contextFields)
 		return c.handlePlaybackError(err, "encoder_init")
 	}
 
-	// Start the stream processor
+	// Step 2: Prepare encoder for streaming
+	c.logger.Debug("Preparing encoder for streaming", contextFields)
+	if err := c.audioEncoder.PrepareForStreaming(); err != nil {
+		c.logger.Error("Audio encoder streaming preparation failed", err, contextFields)
+		return c.handlePlaybackError(err, "encoder_prepare")
+	}
+
+	// Step 3: Start the stream processor
+	c.logger.Debug("Starting stream processor", contextFields)
 	stream, err := c.streamProcessor.StartStream(url)
 	if err != nil {
+		c.logger.Error("Stream processor start failed", err, contextFields)
 		return c.handlePlaybackError(err, "stream_start")
 	}
 
-	// Record successful startup
-	c.metrics.RecordStartupTime(time.Since(startTime))
+	// Step 4: Record successful startup metrics
+	startupDuration := time.Since(startTime)
+	c.metrics.RecordStartupTime(startupDuration)
+	
+	contextFields["startup_duration"] = FormatDuration(startupDuration)
+	c.logger.Info("Pipeline components initialized successfully", contextFields)
 
-	// Update state to playing
+	// Step 5: Update state to playing
 	c.mu.Lock()
 	c.state = StatePlaying
 	c.mu.Unlock()
 
-	c.logger.Info("Playback started successfully", CreateContextFields("", "", url))
+	c.logger.Info("Playback started successfully, beginning audio stream", contextFields)
 
-	// Start streaming audio in a separate goroutine
+	// Step 6: Start streaming audio in a separate goroutine
+	// This is non-blocking so the method can return immediately
 	go c.streamAudio(stream)
 
 	return nil
 }
 
 // streamAudio handles the audio streaming loop
+// This method manages the continuous audio streaming process:
+// 1. Set up streaming buffers and context
+// 2. Continuously read PCM data from stream
+// 3. Encode PCM data to Opus format
+// 4. Send Opus frames to Discord voice connection
+// 5. Handle streaming errors and cleanup
 func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
-	defer stream.Close()
+	defer func() {
+		stream.Close()
+		c.logger.Debug("Audio streaming loop ended", CreateContextFields("", "", c.currentURL))
+	}()
 
-	c.logger.Debug("Starting audio streaming loop", CreateContextFields("", "", c.currentURL))
+	// Get current context for logging
+	c.mu.RLock()
+	url := c.currentURL
+	guildID := ""
+	if c.voiceConn != nil {
+		guildID = c.voiceConn.GuildID
+	}
+	c.mu.RUnlock()
 
-	// Get frame size from encoder
+	contextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream")
+	c.logger.Debug("Starting audio streaming loop", contextFields)
+
+	// Get optimal frame size from encoder
 	frameSize := c.audioEncoder.GetFrameSize()
+	frameDuration := c.audioEncoder.GetFrameDuration()
+	
+	// Prepare buffers for audio processing
 	pcmBuffer := make([]int16, frameSize)
-	byteBuffer := make([]byte, frameSize*2) // 2 bytes per int16
+	byteBuffer := make([]byte, frameSize*2) // 2 bytes per int16 sample
+	
+	contextFields["frame_size"] = frameSize
+	contextFields["frame_duration"] = FormatDuration(frameDuration)
+	c.logger.Debug("Audio streaming buffers initialized", contextFields)
 
+	// Streaming statistics
+	framesProcessed := 0
+	bytesProcessed := 0
+	streamStartTime := time.Now()
+
+	// Main streaming loop
 	for {
 		select {
 		case <-c.stopChan:
-			c.logger.Debug("Stop signal received, ending stream", CreateContextFields("", "", c.currentURL))
+			c.logger.Debug("Stop signal received, ending stream", contextFields)
 			return
 		case <-c.ctx.Done():
-			c.logger.Debug("Context cancelled, ending stream", CreateContextFields("", "", c.currentURL))
+			c.logger.Debug("Context cancelled, ending stream", contextFields)
 			return
 		default:
-			// Read PCM data from stream
+			// Read PCM data from stream processor
 			n, err := stream.Read(byteBuffer)
 			if err != nil {
 				if err == io.EOF {
-					c.logger.Info("Stream ended normally", CreateContextFields("", "", c.currentURL))
+					// Normal stream completion
+					streamDuration := time.Since(streamStartTime)
+					endContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_end")
+					endContextFields["frames_processed"] = framesProcessed
+					endContextFields["bytes_processed"] = bytesProcessed
+					endContextFields["stream_duration"] = FormatDuration(streamDuration)
+					
+					c.logger.Info("Stream ended normally", endContextFields)
 					c.handleStreamEnd()
 					return
 				}
-				c.logger.Error("Stream read error", err, CreateContextFields("", "", c.currentURL))
+				
+				// Stream read error - attempt recovery
+				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_read")
+				errorContextFields["frames_processed"] = framesProcessed
+				errorContextFields["bytes_processed"] = bytesProcessed
+				
+				c.logger.Error("Stream read error", err, errorContextFields)
 				c.handlePlaybackError(err, "stream_read")
 				return
 			}
 
+			// Skip empty reads
 			if n == 0 {
 				continue
 			}
 
-			// Convert bytes to int16 PCM samples
+			bytesProcessed += n
+
+			// Convert bytes to int16 PCM samples (little-endian)
 			samplesRead := n / 2
 			for i := 0; i < samplesRead; i++ {
 				pcmBuffer[i] = int16(byteBuffer[i*2]) | int16(byteBuffer[i*2+1])<<8
 			}
 
-			// Encode to Opus
-			opusData, err := c.audioEncoder.Encode(pcmBuffer[:samplesRead])
+			// Validate frame size before encoding
+			if err := c.audioEncoder.ValidateFrameSize(pcmBuffer[:samplesRead]); err != nil {
+				c.logger.Warn("Invalid frame size, adjusting", CreateContextFieldsWithComponent(guildID, "", url, "frame_validation"))
+				// Continue with available samples - encoder should handle partial frames
+			}
+
+			// Encode PCM data to Opus format
+			opusData, err := c.audioEncoder.EncodeFrame(pcmBuffer[:samplesRead])
 			if err != nil {
-				c.logger.Error("Encoding error", err, CreateContextFields("", "", c.currentURL))
+				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
+				errorContextFields["samples_count"] = samplesRead
+				errorContextFields["frame_number"] = framesProcessed
+				
+				c.logger.Error("Encoding error", err, errorContextFields)
 				c.handlePlaybackError(err, "encoding")
 				return
 			}
 
-			// Send to Discord
+			// Send encoded audio to Discord voice connection
 			if c.voiceConn != nil && c.voiceConn.OpusSend != nil {
 				select {
 				case c.voiceConn.OpusSend <- opusData:
-					// Successfully sent
+					// Successfully sent frame
+					framesProcessed++
+					
+					// Log progress periodically (every 100 frames)
+					if framesProcessed%100 == 0 {
+						progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
+						progressFields["frames_processed"] = framesProcessed
+						progressFields["bytes_processed"] = bytesProcessed
+						progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
+						c.logger.Debug("Streaming progress", progressFields)
+					}
+					
 				case <-c.stopChan:
+					c.logger.Debug("Stop signal received while sending frame", contextFields)
 					return
 				case <-c.ctx.Done():
+					c.logger.Debug("Context cancelled while sending frame", contextFields)
 					return
 				default:
-					// Channel is full, skip this frame
-					c.logger.Debug("Discord send channel full, skipping frame", CreateContextFields("", "", c.currentURL))
+					// Discord send channel is full - this indicates potential issues
+					// Skip this frame but log the occurrence
+					c.logger.Warn("Discord send channel full, skipping frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
 				}
+			} else {
+				// Voice connection is not available
+				c.logger.Error("Voice connection unavailable", nil, CreateContextFieldsWithComponent(guildID, "", url, "voice_connection"))
+				c.handlePlaybackError(fmt.Errorf("voice connection lost"), "voice_connection")
+				return
 			}
 		}
 	}
 }
 
 // handlePlaybackError handles errors during playback with retry logic
+// This method implements comprehensive error recovery:
+// 1. Update pipeline state and record error details
+// 2. Log error with full context for debugging
+// 3. Record error metrics for monitoring
+// 4. Determine retry strategy using error handler
+// 5. Execute retry with proper delays and limits
+// 6. Handle permanent failures with cleanup
 func (c *AudioPipelineController) handlePlaybackError(err error, context string) error {
+	// Capture current state for error handling
 	c.mu.Lock()
 	c.lastError = err
 	c.errorCount++
 	errorCount := c.errorCount
 	url := c.currentURL
+	guildID := ""
+	if c.voiceConn != nil {
+		guildID = c.voiceConn.GuildID
+	}
 	c.state = StateError
 	c.mu.Unlock()
 
-	c.logger.Error("Playback error occurred", err, CreateContextFieldsWithComponent("", "", url, context))
+	// Create comprehensive error context for logging
+	errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, context)
+	errorContextFields["error_count"] = errorCount
+	errorContextFields["error_type"] = fmt.Sprintf("%T", err)
+	errorContextFields["error_message"] = err.Error()
 
-	// Record error in metrics
+	c.logger.Error("Playback error occurred", err, errorContextFields)
+
+	// Record error in metrics system
 	c.metrics.RecordError(context)
 
-	// Use error handler to determine if we should retry
+	// Use error handler to determine retry strategy
 	shouldRetry, delay := c.errorHandler.HandleError(err, context)
+	maxRetries := c.config.GetRetryConfig().MaxRetries
 
-	if shouldRetry && errorCount <= c.config.GetRetryConfig().MaxRetries {
-		c.logger.Info("Retrying playback after error", CreateContextFields("", "", url))
+	// Log retry decision
+	retryContextFields := CreateContextFieldsWithComponent(guildID, "", url, "retry_decision")
+	retryContextFields["should_retry"] = shouldRetry
+	retryContextFields["retry_delay"] = FormatDuration(delay)
+	retryContextFields["attempt"] = errorCount
+	retryContextFields["max_retries"] = maxRetries
 
-		// Wait for retry delay
+	if shouldRetry && errorCount <= maxRetries {
+		c.logger.Info("Attempting retry after error", retryContextFields)
+
+		// Notify about retry attempt (if notifier is configured)
+		c.errorHandler.NotifyRetryAttempt(errorCount, err, delay)
+
+		// Wait for retry delay with cancellation support
+		retryTimer := time.NewTimer(delay)
+		defer retryTimer.Stop()
+
 		select {
-		case <-time.After(delay):
-			// Continue with retry
+		case <-retryTimer.C:
+			// Delay completed, proceed with retry
+			c.logger.Debug("Retry delay completed, attempting recovery", retryContextFields)
 		case <-c.stopChan:
-			return fmt.Errorf("stop requested during retry delay")
+			c.logger.Info("Stop requested during retry delay", retryContextFields)
+			return fmt.Errorf("stop requested during retry delay for error: %w", err)
 		case <-c.ctx.Done():
-			return fmt.Errorf("context cancelled during retry delay")
+			c.logger.Info("Context cancelled during retry delay", retryContextFields)
+			return fmt.Errorf("context cancelled during retry delay for error: %w", err)
 		}
 
-		// Reset state for retry
+		// Clean up current state before retry
+		c.cleanupForRetry()
+
+		// Reset state for retry attempt
 		c.mu.Lock()
 		c.state = StateStarting
 		c.mu.Unlock()
 
-		// Retry the playback
+		// Log retry attempt
+		retryAttemptFields := CreateContextFieldsWithComponent(guildID, "", url, "retry_attempt")
+		retryAttemptFields["attempt"] = errorCount
+		c.logger.Info("Executing retry attempt", retryAttemptFields)
+
+		// Retry the playback execution
 		return c.executePlayback(url, c.voiceConn)
 	}
 
-	// Max retries exceeded or non-retryable error
-	c.logger.Error("Playback failed permanently", err, CreateContextFields("", "", url))
-	c.Stop() // Clean up resources
-	return fmt.Errorf("playback failed after %d attempts: %w", errorCount, err)
+	// Max retries exceeded or non-retryable error - permanent failure
+	failureContextFields := CreateContextFieldsWithComponent(guildID, "", url, "permanent_failure")
+	failureContextFields["final_error_count"] = errorCount
+	failureContextFields["max_retries"] = maxRetries
+	failureContextFields["retry_exhausted"] = errorCount > maxRetries
+	failureContextFields["non_retryable"] = !shouldRetry
+
+	c.logger.Error("Playback failed permanently", err, failureContextFields)
+
+	// Notify about permanent failure
+	c.errorHandler.NotifyMaxRetriesExceeded(err, errorCount)
+
+	// Clean up all resources
+	c.Stop()
+
+	// Return comprehensive error information
+	if errorCount > maxRetries {
+		return fmt.Errorf("playback failed after %d attempts (max %d): %w", errorCount, maxRetries, err)
+	} else {
+		return fmt.Errorf("playback failed with non-retryable error: %w", err)
+	}
+}
+
+// cleanupForRetry performs cleanup operations before attempting a retry
+func (c *AudioPipelineController) cleanupForRetry() {
+	c.logger.Debug("Performing cleanup before retry", CreateContextFields("", "", c.currentURL))
+
+	// Stop stream processor if running
+	if c.streamProcessor != nil && c.streamProcessor.IsRunning() {
+		if err := c.streamProcessor.Stop(); err != nil {
+			c.logger.Warn("Error stopping stream processor during cleanup", CreateContextFields("", "", c.currentURL))
+		}
+	}
+
+	// Close and reinitialize audio encoder
+	if c.audioEncoder != nil {
+		if err := c.audioEncoder.Close(); err != nil {
+			c.logger.Warn("Error closing audio encoder during cleanup", CreateContextFields("", "", c.currentURL))
+		}
+	}
 }
 
 // handleStreamEnd handles normal stream completion
