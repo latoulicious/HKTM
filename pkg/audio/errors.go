@@ -10,8 +10,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
-	"github.com/latoulicious/HKTM/pkg/database/models"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // DiscordNotifier implements UserNotifier for Discord notifications
@@ -73,6 +72,7 @@ func (dn *DiscordNotifier) NotifyFatalError(channelID string, errorType string, 
 type BasicErrorHandler struct {
 	retryConfig         *RetryConfig
 	logger              AudioLogger
+	pipelineLogger      logging.Logger // Centralized pipeline-specific logger
 	repository          AudioRepository
 	guildID             string
 	notifier            UserNotifier
@@ -82,9 +82,14 @@ type BasicErrorHandler struct {
 
 // NewBasicErrorHandler creates a new BasicErrorHandler instance
 func NewBasicErrorHandler(config *RetryConfig, logger AudioLogger, repo AudioRepository, guildID string) ErrorHandler {
+	// Create pipeline-specific logger for error handling context
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	pipelineLogger := loggerFactory.CreateAudioLogger(guildID).WithPipeline("error-handler")
+	
 	return &BasicErrorHandler{
 		retryConfig:         config,
 		logger:              logger,
+		pipelineLogger:      pipelineLogger,
 		repository:          repo,
 		guildID:             guildID,
 		enableNotifications: false, // Disabled by default, can be enabled via SetNotifier
@@ -93,9 +98,17 @@ func NewBasicErrorHandler(config *RetryConfig, logger AudioLogger, repo AudioRep
 
 // NewBasicErrorHandlerWithNotifier creates a new BasicErrorHandler with user notification support
 func NewBasicErrorHandlerWithNotifier(config *RetryConfig, logger AudioLogger, repo AudioRepository, guildID string, notifier UserNotifier, channelID string) ErrorHandler {
+	// Create pipeline-specific logger for error handling context
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	pipelineLogger := loggerFactory.CreateAudioLogger(guildID).WithPipeline("error-handler").WithContext(map[string]interface{}{
+		"channel_id": channelID,
+		"notifications_enabled": true,
+	})
+	
 	return &BasicErrorHandler{
 		retryConfig:         config,
 		logger:              logger,
+		pipelineLogger:      pipelineLogger,
 		repository:          repo,
 		guildID:             guildID,
 		notifier:            notifier,
@@ -109,23 +122,38 @@ func (beh *BasicErrorHandler) SetNotifier(notifier UserNotifier, channelID strin
 	beh.notifier = notifier
 	beh.channelID = channelID
 	beh.enableNotifications = true
+	
+	// Update pipeline logger context with notification settings
+	beh.pipelineLogger = beh.pipelineLogger.WithContext(map[string]interface{}{
+		"channel_id": channelID,
+		"notifications_enabled": true,
+	})
 }
 
 // DisableNotifications disables user notifications
 func (beh *BasicErrorHandler) DisableNotifications() {
 	beh.enableNotifications = false
+	
+	// Update pipeline logger context
+	beh.pipelineLogger = beh.pipelineLogger.WithContext(map[string]interface{}{
+		"notifications_enabled": false,
+	})
 }
 
 // HandleError processes an error and determines if it should be retried and with what delay
 func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetry bool, delay time.Duration) {
+	// Create context-specific logger for this error handling session
+	contextLogger := beh.pipelineLogger.WithContext(CreateContextFieldsWithComponent(beh.guildID, "", "", "error-handler"))
+	
 	// Log the error first with enhanced context
 	beh.LogError(err, context)
 
 	// Check if the error is retryable
 	if !beh.IsRetryableError(err) {
-		beh.logger.Info("Error is not retryable, skipping retry logic", map[string]interface{}{
+		contextLogger.Info("Error is not retryable, skipping retry logic", map[string]interface{}{
 			"error":   err.Error(),
 			"context": context,
+			"error_type": beh.classifyErrorType(err),
 		})
 
 		// Notify user of fatal error if notifications are enabled
@@ -133,7 +161,7 @@ func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetr
 			errorType := beh.classifyErrorType(err)
 			userMessage := beh.createUserFriendlyErrorMessage(err, errorType)
 			if notifyErr := beh.notifier.NotifyFatalError(beh.channelID, errorType, userMessage); notifyErr != nil {
-				beh.logger.Warn("Failed to send fatal error notification to user", map[string]interface{}{
+				contextLogger.Warn("Failed to send fatal error notification to user", map[string]interface{}{
 					"notification_error": notifyErr.Error(),
 					"original_error":     err.Error(),
 					"channel_id":         beh.channelID,
@@ -149,16 +177,18 @@ func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetr
 	// This method just determines if an error type is retryable and calculates delay
 	delay = beh.calculateExponentialBackoff(1) // Start with attempt 1 for base calculation
 
-	beh.logger.Info("Error is retryable, will attempt retry", map[string]interface{}{
+	contextLogger.Info("Error is retryable, will attempt retry", map[string]interface{}{
 		"error":       err.Error(),
 		"context":     context,
+		"error_type":  beh.classifyErrorType(err),
 		"retry_delay": delay.String(),
+		"max_retries": beh.retryConfig.MaxRetries,
 	})
 
 	// Notify user of retry attempt if notifications are enabled
 	if beh.enableNotifications && beh.notifier != nil && beh.channelID != "" {
 		if notifyErr := beh.notifier.NotifyRetry(beh.channelID, 1, beh.retryConfig.MaxRetries, delay); notifyErr != nil {
-			beh.logger.Warn("Failed to send retry notification to user", map[string]interface{}{
+			contextLogger.Warn("Failed to send retry notification to user", map[string]interface{}{
 				"notification_error": notifyErr.Error(),
 				"original_error":     err.Error(),
 				"channel_id":         beh.channelID,
@@ -174,33 +204,34 @@ func (beh *BasicErrorHandler) LogError(err error, context string) {
 	// Classify the error type for database storage
 	errorType := beh.classifyErrorType(err)
 
-	// Create enhanced debugging context
+	// Create enhanced debugging context using shared utilities
 	debugContext := beh.createDebugContext(err, context, errorType)
 
-	// Log to console via AudioLogger with enhanced context
+	// Log to centralized logging system with pipeline context
+	contextLogger := beh.pipelineLogger.WithContext(debugContext)
+	contextLogger.Error("Audio pipeline error occurred", err, map[string]interface{}{
+		"error_type": errorType,
+		"context": context,
+		"retryable": beh.IsRetryableError(err),
+	})
+
+	// Also log to legacy AudioLogger for backward compatibility
 	beh.logger.Error("Audio pipeline error occurred", err, debugContext)
 
 	// Save to database if repository is available
 	if beh.repository != nil {
-		audioError := &models.AudioError{
-			ID:        uuid.New(),
-			GuildID:   beh.guildID,
-			ErrorType: errorType,
-			ErrorMsg:  err.Error(),
-			Context:   beh.formatContextForDatabase(context, debugContext),
-			Timestamp: time.Now(),
-			Resolved:  false,
-		}
+		// Use shared utility to create consistent error record
+		audioError := CreateAudioError(beh.guildID, errorType, err.Error(), beh.formatContextForDatabase(context, debugContext))
 
 		if saveErr := beh.repository.SaveError(audioError); saveErr != nil {
-			beh.logger.Warn("Failed to save error to database", map[string]interface{}{
+			contextLogger.Warn("Failed to save error to database", map[string]interface{}{
 				"save_error":     saveErr.Error(),
 				"original_error": err.Error(),
 				"context":        context,
 				"error_type":     errorType,
 			})
 		} else {
-			beh.logger.Debug("Error successfully saved to database", map[string]interface{}{
+			contextLogger.Debug("Error successfully saved to database", map[string]interface{}{
 				"error_id":   audioError.ID.String(),
 				"error_type": errorType,
 				"context":    context,
@@ -216,40 +247,72 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	}
 
 	errorStr := strings.ToLower(err.Error())
+	errorType := beh.classifyErrorType(err)
 
 	// Network-related errors (retryable)
 	if isNetworkError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable network error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "network error pattern matched",
+		})
 		return true
 	}
 
 	// Process-related errors (retryable)
 	if isProcessError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable process error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "process error pattern matched",
+		})
 		return true
 	}
 
 	// yt-dlp specific retryable errors
 	if isYtDlpRetryableError(errorStr) {
+		beh.pipelineLogger.Debug("Error classified as retryable yt-dlp error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "yt-dlp retryable pattern matched",
+		})
 		return true
 	}
 
 	// FFmpeg specific retryable errors
 	if isFFmpegRetryableError(errorStr) {
+		beh.pipelineLogger.Debug("Error classified as retryable FFmpeg error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "FFmpeg retryable pattern matched",
+		})
 		return true
 	}
 
 	// Discord API retryable errors
 	if isDiscordRetryableError(errorStr) {
+		beh.pipelineLogger.Debug("Error classified as retryable Discord error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "Discord retryable pattern matched",
+		})
 		return true
 	}
 
 	// Temporary file system errors (retryable)
 	if isTemporaryFileSystemError(errorStr) {
+		beh.pipelineLogger.Debug("Error classified as retryable filesystem error", map[string]interface{}{
+			"error": err.Error(),
+			"error_type": errorType,
+			"classification_reason": "temporary filesystem error pattern matched",
+		})
 		return true
 	}
 
 	// Default to non-retryable for unknown errors
-	beh.logger.Debug("Error classified as non-retryable", map[string]interface{}{
-		"error":                 err.Error(),
+	beh.pipelineLogger.Debug("Error classified as non-retryable", map[string]interface{}{
+		"error": err.Error(),
+		"error_type": errorType,
 		"classification_reason": "no matching retryable pattern",
 	})
 
@@ -500,10 +563,12 @@ func (beh *BasicErrorHandler) GetMaxRetries() int {
 // ShouldRetryAfterAttempts determines if retrying should continue after a given number of attempts
 func (beh *BasicErrorHandler) ShouldRetryAfterAttempts(attempts int, err error) bool {
 	if attempts >= beh.retryConfig.MaxRetries {
-		beh.logger.Info("Maximum retry attempts reached", map[string]interface{}{
+		contextLogger := beh.pipelineLogger.WithContext(CreateContextFieldsWithComponent(beh.guildID, "", "", "retry-logic"))
+		contextLogger.Info("Maximum retry attempts reached", map[string]interface{}{
 			"attempts":    attempts,
 			"max_retries": beh.retryConfig.MaxRetries,
 			"final_error": err.Error(),
+			"error_type":  beh.classifyErrorType(err),
 		})
 		return false
 	}
@@ -533,16 +598,16 @@ func CreateMaxRetriesError(lastErr error, attempts int) error {
 
 // createDebugContext creates enhanced debugging context for error logging
 func (beh *BasicErrorHandler) createDebugContext(err error, context string, errorType string) map[string]interface{} {
-	debugContext := map[string]interface{}{
-		"context":     context,
-		"error_type":  errorType,
-		"guild_id":    beh.guildID,
-		"timestamp":   time.Now().Format(time.RFC3339),
-		"retryable":   beh.IsRetryableError(err),
-		"max_retries": beh.retryConfig.MaxRetries,
-		"base_delay":  beh.retryConfig.BaseDelay.String(),
-		"max_delay":   beh.retryConfig.MaxDelay.String(),
-	}
+	// Start with shared context fields using utility function
+	debugContext := CreateContextFieldsWithComponent(beh.guildID, "", "", "error-handler")
+	
+	// Add error-specific context
+	debugContext["context"] = context
+	debugContext["error_type"] = errorType
+	debugContext["retryable"] = beh.IsRetryableError(err)
+	debugContext["max_retries"] = beh.retryConfig.MaxRetries
+	debugContext["base_delay"] = beh.retryConfig.BaseDelay.String()
+	debugContext["max_delay"] = beh.retryConfig.MaxDelay.String()
 
 	// Add error-specific debugging information
 	switch errorType {
@@ -737,8 +802,18 @@ func (beh *BasicErrorHandler) NotifyRetryAttempt(attempt int, err error, delay t
 		return
 	}
 
+	// Log retry attempt with centralized logging
+	contextLogger := beh.pipelineLogger.WithContext(CreateContextFieldsWithComponent(beh.guildID, "", "", "notification"))
+	contextLogger.Info("Sending retry notification to user", map[string]interface{}{
+		"retry_attempt": attempt,
+		"max_retries":   beh.retryConfig.MaxRetries,
+		"retry_delay":   FormatDuration(delay),
+		"error_type":    beh.classifyErrorType(err),
+		"channel_id":    beh.channelID,
+	})
+
 	if notifyErr := beh.notifier.NotifyRetry(beh.channelID, attempt, beh.retryConfig.MaxRetries, delay); notifyErr != nil {
-		beh.logger.Warn("Failed to send retry attempt notification to user", map[string]interface{}{
+		contextLogger.Warn("Failed to send retry attempt notification to user", map[string]interface{}{
 			"notification_error": notifyErr.Error(),
 			"retry_attempt":      attempt,
 			"original_error":     err.Error(),
@@ -757,8 +832,17 @@ func (beh *BasicErrorHandler) NotifyMaxRetriesExceeded(finalErr error, attempts 
 	userMessage := fmt.Sprintf("%s\n\nTried %d times but couldn't recover. You may try playing the audio again.",
 		beh.createUserFriendlyErrorMessage(finalErr, errorType), attempts)
 
+	// Log max retries exceeded with centralized logging
+	contextLogger := beh.pipelineLogger.WithContext(CreateContextFieldsWithComponent(beh.guildID, "", "", "notification"))
+	contextLogger.Info("Sending max retries exceeded notification to user", map[string]interface{}{
+		"final_attempts": attempts,
+		"max_retries":    beh.retryConfig.MaxRetries,
+		"error_type":     errorType,
+		"channel_id":     beh.channelID,
+	})
+
 	if notifyErr := beh.notifier.NotifyFatalError(beh.channelID, errorType, userMessage); notifyErr != nil {
-		beh.logger.Warn("Failed to send max retries exceeded notification to user", map[string]interface{}{
+		contextLogger.Warn("Failed to send max retries exceeded notification to user", map[string]interface{}{
 			"notification_error": notifyErr.Error(),
 			"final_error":        finalErr.Error(),
 			"attempts":           attempts,
