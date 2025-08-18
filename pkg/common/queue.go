@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/latoulicious/HKTM/pkg/audio"
+	"github.com/latoulicious/HKTM/pkg/logging"
+	"gorm.io/gorm"
 )
 
 // QueueItem represents a single item in the music queue
@@ -30,14 +33,39 @@ type MusicQueue struct {
 	wasSkipped bool // Flag to track if current song was skipped
 	mu         sync.RWMutex
 	voiceConn  *discordgo.VoiceConnection
-	pipeline   *AudioPipeline
+	pipeline   audio.AudioPipeline // Updated to use new AudioPipeline interface
+	logger     logging.Logger      // Centralized logging
+	db         *gorm.DB           // Database connection for pipeline creation
 }
 
 // NewMusicQueue creates a new music queue for a guild
 func NewMusicQueue(guildID string) *MusicQueue {
+	// Create centralized logger for queue operations
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateLogger("queue").WithContext(map[string]interface{}{
+		"guild_id": guildID,
+	})
+
 	return &MusicQueue{
 		guildID: guildID,
 		items:   make([]*QueueItem, 0),
+		logger:  logger,
+	}
+}
+
+// NewMusicQueueWithDB creates a new music queue with database connection for pipeline creation
+func NewMusicQueueWithDB(guildID string, db *gorm.DB) *MusicQueue {
+	// Create centralized logger for queue operations
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateLogger("queue").WithContext(map[string]interface{}{
+		"guild_id": guildID,
+	})
+
+	return &MusicQueue{
+		guildID: guildID,
+		items:   make([]*QueueItem, 0),
+		logger:  logger,
+		db:      db,
 	}
 }
 
@@ -54,7 +82,19 @@ func (mq *MusicQueue) Add(url, title, requestedBy string) {
 	}
 
 	mq.items = append(mq.items, item)
-	log.Printf("Added '%s' to queue for guild %s", title, mq.guildID)
+	
+	// Use centralized logging
+	if mq.logger != nil {
+		mq.logger.Info("Added item to queue", map[string]interface{}{
+			"title":        title,
+			"url":          url,
+			"requested_by": requestedBy,
+			"queue_size":   len(mq.items),
+		})
+	} else {
+		// Fallback to standard logging if centralized logger not available
+		log.Printf("Added '%s' to queue for guild %s", title, mq.guildID)
+	}
 }
 
 // AddWithYouTubeData adds a new item to the queue with YouTube-specific data
@@ -73,7 +113,22 @@ func (mq *MusicQueue) AddWithYouTubeData(url, originalURL, videoID, title, reque
 	}
 
 	mq.items = append(mq.items, item)
-	log.Printf("Added '%s' (Duration: %v) to queue for guild %s", title, duration, mq.guildID)
+	
+	// Use centralized logging
+	if mq.logger != nil {
+		mq.logger.Info("Added YouTube item to queue", map[string]interface{}{
+			"title":        title,
+			"url":          url,
+			"original_url": originalURL,
+			"video_id":     videoID,
+			"requested_by": requestedBy,
+			"duration":     duration.String(),
+			"queue_size":   len(mq.items),
+		})
+	} else {
+		// Fallback to standard logging if centralized logger not available
+		log.Printf("Added '%s' (Duration: %v) to queue for guild %s", title, duration, mq.guildID)
+	}
 }
 
 // Next gets the next item from the queue
@@ -119,8 +174,17 @@ func (mq *MusicQueue) Size() int {
 func (mq *MusicQueue) Clear() {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
+	
+	queueSize := len(mq.items)
 	mq.items = make([]*QueueItem, 0)
 	mq.current = nil
+	
+	// Use centralized logging
+	if mq.logger != nil {
+		mq.logger.Info("Cleared queue", map[string]interface{}{
+			"items_cleared": queueSize,
+		})
+	}
 }
 
 // Remove removes an item at the specified index
@@ -134,7 +198,18 @@ func (mq *MusicQueue) Remove(index int) error {
 
 	removed := mq.items[index]
 	mq.items = append(mq.items[:index], mq.items[index+1:]...)
-	log.Printf("Removed '%s' from queue for guild %s", removed.Title, mq.guildID)
+	
+	// Use centralized logging
+	if mq.logger != nil {
+		mq.logger.Info("Removed item from queue", map[string]interface{}{
+			"title":      removed.Title,
+			"index":      index,
+			"queue_size": len(mq.items),
+		})
+	} else {
+		// Fallback to standard logging if centralized logger not available
+		log.Printf("Removed '%s' from queue for guild %s", removed.Title, mq.guildID)
+	}
 	return nil
 }
 
@@ -189,14 +264,26 @@ func (mq *MusicQueue) GetVoiceConnection() *discordgo.VoiceConnection {
 }
 
 // SetPipeline sets the audio pipeline for this queue
-func (mq *MusicQueue) SetPipeline(pipeline *AudioPipeline) {
+func (mq *MusicQueue) SetPipeline(pipeline audio.AudioPipeline) {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 	mq.pipeline = pipeline
+	
+	// Log pipeline state change
+	if mq.logger != nil {
+		if pipeline != nil {
+			mq.logger.Debug("Pipeline set for queue", map[string]interface{}{
+				"pipeline_initialized": pipeline.IsInitialized(),
+				"pipeline_playing":     pipeline.IsPlaying(),
+			})
+		} else {
+			mq.logger.Debug("Pipeline cleared for queue", nil)
+		}
+	}
 }
 
 // GetPipeline returns the audio pipeline
-func (mq *MusicQueue) GetPipeline() *AudioPipeline {
+func (mq *MusicQueue) GetPipeline() audio.AudioPipeline {
 	mq.mu.RLock()
 	defer mq.mu.RUnlock()
 	return mq.pipeline
@@ -221,8 +308,34 @@ func (mq *MusicQueue) StopAndCleanup() {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
+	// Log cleanup operation
+	if mq.logger != nil {
+		mq.logger.Info("Starting queue cleanup", map[string]interface{}{
+			"has_pipeline":   mq.pipeline != nil,
+			"has_voice_conn": mq.voiceConn != nil,
+			"is_playing":     mq.isPlaying,
+		})
+	}
+
+	// Stop and shutdown pipeline using new interface
 	if mq.pipeline != nil {
-		mq.pipeline.Stop()
+		if err := mq.pipeline.Stop(); err != nil {
+			if mq.logger != nil {
+				mq.logger.Error("Error stopping pipeline during cleanup", err, nil)
+			} else {
+				log.Printf("Error stopping pipeline during cleanup: %v", err)
+			}
+		}
+		
+		// Shutdown pipeline to clean up all resources
+		if err := mq.pipeline.Shutdown(); err != nil {
+			if mq.logger != nil {
+				mq.logger.Error("Error shutting down pipeline during cleanup", err, nil)
+			} else {
+				log.Printf("Error shutting down pipeline during cleanup: %v", err)
+			}
+		}
+		
 		mq.pipeline = nil
 	}
 
@@ -232,6 +345,11 @@ func (mq *MusicQueue) StopAndCleanup() {
 	}
 
 	mq.isPlaying = false
+	
+	// Log successful cleanup
+	if mq.logger != nil {
+		mq.logger.Info("Queue cleanup completed", nil)
+	}
 }
 
 // GetFreshStreamURLForCurrent gets a fresh stream URL for the current item
@@ -246,10 +364,99 @@ func (mq *MusicQueue) GetFreshStreamURLForCurrent() (string, error) {
 
 	// If it's a YouTube URL, get a fresh stream URL
 	if mq.current.OriginalURL != "" {
-		log.Printf("Getting fresh stream URL for YouTube video: %s", mq.current.Title)
+		if mq.logger != nil {
+			mq.logger.Debug("Getting fresh stream URL for YouTube video", map[string]interface{}{
+				"title":        mq.current.Title,
+				"original_url": mq.current.OriginalURL,
+			})
+		} else {
+			log.Printf("Getting fresh stream URL for YouTube video: %s", mq.current.Title)
+		}
 		return GetFreshYouTubeStreamURL(mq.current.OriginalURL)
 	}
 
 	// For non-YouTube URLs, return the stored URL
 	return mq.current.URL, nil
+}
+
+// CreateNewPipeline creates a new AudioPipeline using the new AudioPipelineController
+// This method provides backward compatibility while using the new pipeline system
+func (mq *MusicQueue) CreateNewPipeline() (audio.AudioPipeline, error) {
+	if mq.db == nil {
+		return nil, fmt.Errorf("database connection not available - use NewMusicQueueWithDB")
+	}
+
+	// Create new pipeline with all dependencies
+	pipeline, err := audio.NewAudioPipelineWithDependencies(mq.db, mq.guildID)
+	if err != nil {
+		if mq.logger != nil {
+			mq.logger.Error("Failed to create new audio pipeline", err, nil)
+		}
+		return nil, fmt.Errorf("failed to create audio pipeline: %w", err)
+	}
+
+	if mq.logger != nil {
+		mq.logger.Info("Created new audio pipeline", map[string]interface{}{
+			"pipeline_initialized": pipeline.IsInitialized(),
+		})
+	}
+
+	return pipeline, nil
+}
+
+// StartPlayback starts playback using the new AudioPipelineController
+// This method provides a high-level interface for starting playback with proper error handling
+func (mq *MusicQueue) StartPlayback(url string, voiceConn *discordgo.VoiceConnection) error {
+	// Create new pipeline if needed
+	if mq.pipeline == nil {
+		pipeline, err := mq.CreateNewPipeline()
+		if err != nil {
+			return fmt.Errorf("failed to create pipeline: %w", err)
+		}
+		mq.SetPipeline(pipeline)
+	}
+
+	// Set voice connection
+	mq.SetVoiceConnection(voiceConn)
+
+	// Start playback using new pipeline interface
+	if err := mq.pipeline.PlayURL(url, voiceConn); err != nil {
+		if mq.logger != nil {
+			mq.logger.Error("Failed to start playback", err, map[string]interface{}{
+				"url": url,
+			})
+		}
+		return fmt.Errorf("failed to start playback: %w", err)
+	}
+
+	// Update playing state
+	mq.SetPlaying(true)
+
+	if mq.logger != nil {
+		mq.logger.Info("Playback started successfully", map[string]interface{}{
+			"url": url,
+		})
+	}
+
+	return nil
+}
+
+// GetDB returns the database connection
+func (mq *MusicQueue) GetDB() *gorm.DB {
+	mq.mu.RLock()
+	defer mq.mu.RUnlock()
+	return mq.db
+}
+
+// SetDB sets the database connection for pipeline creation
+func (mq *MusicQueue) SetDB(db *gorm.DB) {
+	mq.mu.Lock()
+	defer mq.mu.Unlock()
+	mq.db = db
+	
+	if mq.logger != nil {
+		mq.logger.Debug("Database connection set for queue", map[string]interface{}{
+			"has_db": db != nil,
+		})
+	}
 }

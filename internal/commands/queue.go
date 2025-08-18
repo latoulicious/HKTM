@@ -10,12 +10,16 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/presence"
 	"github.com/latoulicious/HKTM/pkg/common"
+	"gorm.io/gorm"
 )
 
 var (
 	// Global queue manager to track queues per guild
 	queues     = make(map[string]*common.MusicQueue)
 	queueMutex sync.RWMutex
+
+	// Global database connection for pipeline creation
+	queueDB *gorm.DB
 
 	// Global presence manager
 	presenceManager *presence.PresenceManager
@@ -427,10 +431,6 @@ func startNextInQueue(s *discordgo.Session, m *discordgo.MessageCreate, queue *c
 
 	queue.SetVoiceConnection(vc)
 
-	// Create and start the audio pipeline
-	pipeline := common.NewAudioPipeline(vc)
-	queue.SetPipeline(pipeline)
-
 	// Update bot presence to show current song
 	if presenceManager != nil {
 		log.Printf("Updating presence to show: %s", item.Title)
@@ -443,14 +443,24 @@ func startNextInQueue(s *discordgo.Session, m *discordgo.MessageCreate, queue *c
 	description := item.Title
 	sendEmbedMessage(s, m.ChannelID, "🎶 Now Playing", description, 0x00ff00)
 
-	// Start streaming with URL refresh capability for YouTube URLs
+	// Use the new pipeline system with enhanced error handling
+	// The queue will handle pipeline creation and URL refresh automatically
+	var playbackURL string
 	if item.OriginalURL != "" {
-		// Use the new method that can refresh URLs on restart
-		err = pipeline.PlayStreamWithOriginalURL(item.URL, item.OriginalURL)
+		// For YouTube URLs, get a fresh URL to avoid expiration
+		freshURL, urlErr := queue.GetFreshStreamURLForCurrent()
+		if urlErr != nil {
+			log.Printf("Failed to get fresh URL, using original: %v", urlErr)
+			playbackURL = item.URL
+		} else {
+			playbackURL = freshURL
+		}
 	} else {
-		// Use the standard method for non-YouTube URLs
-		err = pipeline.PlayStream(item.URL)
+		playbackURL = item.URL
 	}
+
+	// Start playback using the new pipeline system
+	err = queue.StartPlayback(playbackURL, vc)
 	if err != nil {
 		sendEmbedMessage(s, m.ChannelID, "❌ Error", "Failed to start audio playback.", 0xff0000)
 		queue.StopAndCleanup()
@@ -462,6 +472,13 @@ func startNextInQueue(s *discordgo.Session, m *discordgo.MessageCreate, queue *c
 
 	// Monitor the pipeline and handle completion
 	go func() {
+		// Get the pipeline for monitoring
+		pipeline := queue.GetPipeline()
+		if pipeline == nil {
+			log.Printf("Warning: No pipeline available for monitoring")
+			return
+		}
+
 		// Wait for pipeline to finish
 		for pipeline.IsPlaying() {
 			time.Sleep(1 * time.Second)
@@ -487,10 +504,41 @@ func getOrCreateQueue(guildID string) *common.MusicQueue {
 	defer queueMutex.Unlock()
 
 	if queue, exists := queues[guildID]; exists {
+		// Update existing queue with database connection if available and not already set
+		if queueDB != nil && queue.GetDB() == nil {
+			queue.SetDB(queueDB)
+		}
 		return queue
 	}
 
-	queue := common.NewMusicQueue(guildID)
+	// Create queue with database connection if available
+	var queue *common.MusicQueue
+	if queueDB != nil {
+		queue = common.NewMusicQueueWithDB(guildID, queueDB)
+	} else {
+		// Fallback to basic queue if no database connection available
+		queue = common.NewMusicQueue(guildID)
+	}
+	
+	queues[guildID] = queue
+	return queue
+}
+
+// getOrCreateQueueWithDB gets or creates a queue for a guild with database connection
+func getOrCreateQueueWithDB(guildID string, db *gorm.DB) *common.MusicQueue {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+
+	if queue, exists := queues[guildID]; exists {
+		// Update existing queue with database connection if not already set
+		if queue.GetDB() == nil {
+			queue.SetDB(db)
+		}
+		return queue
+	}
+
+	// Create new queue with database connection
+	queue := common.NewMusicQueueWithDB(guildID, db)
 	queues[guildID] = queue
 	return queue
 }
@@ -500,4 +548,10 @@ func getQueue(guildID string) *common.MusicQueue {
 	queueMutex.RLock()
 	defer queueMutex.RUnlock()
 	return queues[guildID]
+}
+
+// InitializeQueueCommands initializes the queue commands with database connection
+func InitializeQueueCommands(db *gorm.DB) {
+	queueDB = db
+	log.Println("Queue commands initialized with database connection")
 }

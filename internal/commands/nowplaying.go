@@ -53,7 +53,7 @@ func sendNothingPlayingEmbed(s *discordgo.Session, channelID string) {
 }
 
 // sendNowPlayingEmbed sends a detailed now playing embed
-func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.QueueItem, pipeline *common.AudioPipeline, voiceConn *discordgo.VoiceConnection) {
+func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.QueueItem, pipeline interface{}, voiceConn *discordgo.VoiceConnection) {
 	// Build description with track info
 	description := fmt.Sprintf("**%s**", item.Title)
 
@@ -63,8 +63,20 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 	// Determine connection status
 	var statusEmoji string
 	var statusText string
+	var isPlaying bool
 
-	if pipeline != nil && pipeline.IsPlaying() {
+	// Handle both old and new pipeline types
+	if pipeline != nil {
+		// Try new AudioPipeline interface first
+		if newPipeline, ok := pipeline.(interface{ IsPlaying() bool }); ok {
+			isPlaying = newPipeline.IsPlaying()
+		} else if oldPipeline, ok := pipeline.(*common.AudioPipeline); ok {
+			// Fallback to old AudioPipeline type
+			isPlaying = oldPipeline.IsPlaying()
+		}
+	}
+
+	if isPlaying {
 		if voiceConn != nil && voiceConn.Ready {
 			statusEmoji = "🟢"
 			statusText = "Playing"
