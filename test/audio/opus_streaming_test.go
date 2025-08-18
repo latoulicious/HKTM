@@ -7,6 +7,16 @@ import (
 	"github.com/latoulicious/HKTM/pkg/audio"
 )
 
+// MockAudioLogger is a simple mock implementation of AudioLogger for testing
+type MockAudioLogger struct{}
+
+func (m *MockAudioLogger) Info(msg string, fields map[string]interface{})                    {}
+func (m *MockAudioLogger) Error(msg string, err error, fields map[string]interface{})       {}
+func (m *MockAudioLogger) Warn(msg string, fields map[string]interface{})                   {}
+func (m *MockAudioLogger) Debug(msg string, fields map[string]interface{})                  {}
+func (m *MockAudioLogger) WithPipeline(pipeline string) audio.AudioLogger                   { return m }
+func (m *MockAudioLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger         { return m }
+
 // TestOpusProcessor_StreamingScenario tests the PCM to Opus conversion in a realistic streaming scenario
 func TestOpusProcessor_StreamingScenario(t *testing.T) {
 	// Create Discord-compatible configuration
@@ -15,7 +25,8 @@ func TestOpusProcessor_StreamingScenario(t *testing.T) {
 		FrameSize: 960,    // 20ms frames at 48kHz
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Initialize the processor
 	err := processor.Initialize()
@@ -158,7 +169,8 @@ func TestOpusProcessor_TimingAccuracy(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 	err := processor.Initialize()
 	if err != nil {
 		t.Fatalf("Failed to initialize: %v", err)

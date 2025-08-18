@@ -105,7 +105,7 @@ func createStreamProcessor(config ConfigProvider, logger AudioLogger) (StreamPro
 // createAudioEncoder creates an AudioEncoder implementation
 func createAudioEncoder(config ConfigProvider, logger AudioLogger) (AudioEncoder, error) {
 	opusConfig := config.GetOpusConfig()
-	return NewOpusProcessor(opusConfig), nil
+	return NewOpusProcessor(opusConfig, logger), nil
 }
 
 // createErrorHandler creates an ErrorHandler implementation

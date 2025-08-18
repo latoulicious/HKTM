@@ -6,6 +6,16 @@ import (
 	"github.com/latoulicious/HKTM/pkg/audio"
 )
 
+// MockAudioLogger is a simple mock implementation of AudioLogger for testing
+type MockAudioLogger struct{}
+
+func (m *MockAudioLogger) Info(msg string, fields map[string]interface{})                    {}
+func (m *MockAudioLogger) Error(msg string, err error, fields map[string]interface{})       {}
+func (m *MockAudioLogger) Warn(msg string, fields map[string]interface{})                   {}
+func (m *MockAudioLogger) Debug(msg string, fields map[string]interface{})                  {}
+func (m *MockAudioLogger) WithPipeline(pipeline string) audio.AudioLogger                   { return m }
+func (m *MockAudioLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger         { return m }
+
 func TestOpusProcessor_PCMToOpusConversion(t *testing.T) {
 	// Create Opus configuration for Discord
 	config := &audio.OpusConfig{
@@ -13,7 +23,8 @@ func TestOpusProcessor_PCMToOpusConversion(t *testing.T) {
 		FrameSize: 960, // 20ms at 48kHz
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Initialize the processor
 	err := processor.Initialize()
@@ -109,7 +120,8 @@ func TestOpusProcessor_ErrorHandling(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	t.Run("UninitializedEncoder", func(t *testing.T) {
 		// Try to encode without initializing
@@ -141,7 +153,8 @@ func TestOpusProcessor_DiscordCompatibility(t *testing.T) {
 			FrameSize: 480, // Wrong size for Discord (should be 960)
 		}
 
-		processor := audio.NewOpusProcessor(invalidConfig)
+		logger := &MockAudioLogger{}
+		processor := audio.NewOpusProcessor(invalidConfig, logger)
 		err := processor.Initialize()
 		if err != nil {
 			t.Fatalf("Failed to initialize: %v", err)
@@ -162,7 +175,8 @@ func TestOpusProcessor_DiscordCompatibility(t *testing.T) {
 			FrameSize: 960,
 		}
 
-		processor := audio.NewOpusProcessor(invalidConfig)
+		logger := &MockAudioLogger{}
+		processor := audio.NewOpusProcessor(invalidConfig, logger)
 		err := processor.Initialize()
 		if err != nil {
 			t.Fatalf("Failed to initialize: %v", err)
@@ -183,7 +197,8 @@ func TestOpusProcessor_MultipleFrames(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 	err := processor.Initialize()
 	if err != nil {
 		t.Fatalf("Failed to initialize: %v", err)

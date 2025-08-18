@@ -8,13 +8,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// MockAudioLogger is a simple mock implementation of AudioLogger for testing
+type MockAudioLogger struct{}
+
+func (m *MockAudioLogger) Info(msg string, fields map[string]interface{})                    {}
+func (m *MockAudioLogger) Error(msg string, err error, fields map[string]interface{})       {}
+func (m *MockAudioLogger) Warn(msg string, fields map[string]interface{})                   {}
+func (m *MockAudioLogger) Debug(msg string, fields map[string]interface{})                  {}
+func (m *MockAudioLogger) WithPipeline(pipeline string) audio.AudioLogger                   { return m }
+func (m *MockAudioLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger         { return m }
+
 func TestOpusProcessor_Initialize(t *testing.T) {
 	config := &audio.OpusConfig{
 		Bitrate:   128000,
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Test initialization
 	err := processor.Initialize()
@@ -36,7 +47,8 @@ func TestOpusProcessor_Encode(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Test encoding without initialization should fail
 	pcmData := make([]int16, 1920) // 960 samples * 2 channels
@@ -75,7 +87,8 @@ func TestOpusProcessor_Close(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Test closing without initialization should not error
 	err := processor.Close()
@@ -105,7 +118,8 @@ func TestOpusProcessor_Configuration(t *testing.T) {
 		FrameSize: 480,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Test that configuration is preserved
 	retrievedConfig := processor.(*audio.OpusProcessor).GetConfig()
@@ -119,7 +133,8 @@ func TestOpusProcessor_IsInitialized(t *testing.T) {
 		FrameSize: 960,
 	}
 
-	processor := audio.NewOpusProcessor(config)
+	logger := &MockAudioLogger{}
+	processor := audio.NewOpusProcessor(config, logger)
 
 	// Should not be initialized initially
 	assert.False(t, processor.(*audio.OpusProcessor).IsInitialized())
