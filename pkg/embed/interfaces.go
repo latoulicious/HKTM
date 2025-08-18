@@ -14,18 +14,15 @@ type EmbedBuilder interface {
 	Warning(title, description string) *discordgo.MessageEmbed
 }
 
-// AudioEmbedBuilder extends EmbedBuilder with audio-specific embed functionality
+// AudioEmbedBuilder provides audio-specific embed creation functionality
 type AudioEmbedBuilder interface {
 	EmbedBuilder
 	NowPlaying(title, url string, duration time.Duration) *discordgo.MessageEmbed
-	QueueStatus(current string, queue []string) *discordgo.MessageEmbed
+	QueueStatus(current string, queue []string, queueSize int) *discordgo.MessageEmbed
 	PlaybackError(url string, err error) *discordgo.MessageEmbed
-	QueueEmpty() *discordgo.MessageEmbed
-	AudioStopped() *discordgo.MessageEmbed
-}
-
-// EmbedFactory creates different types of embed builders
-type EmbedFactory interface {
-	CreateAudioEmbedBuilder() AudioEmbedBuilder
-	CreateBasicEmbedBuilder() EmbedBuilder
+	IdleTimeout() *discordgo.MessageEmbed
+	QueueEnded() *discordgo.MessageEmbed
+	SongFinished(title, requestedBy string) *discordgo.MessageEmbed
+	SongSkipped(title, requestedBy, skippedBy string) *discordgo.MessageEmbed
+	PlaybackStopped(stoppedBy string) *discordgo.MessageEmbed
 }

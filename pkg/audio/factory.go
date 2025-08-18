@@ -2,7 +2,9 @@ package audio
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/latoulicious/HKTM/pkg/database/models"
 	"github.com/latoulicious/HKTM/pkg/logging"
 	"gorm.io/gorm"
 )
@@ -139,13 +141,14 @@ type LogRepositoryAdapter struct {
 // SaveLog implements logging.LogRepository interface
 func (l *LogRepositoryAdapter) SaveLog(entry logging.LogEntry) error {
 	// Convert logging.LogEntry to models.AudioLog
-	audioLog := CreateAudioLog(
-		entry.GuildID,
-		entry.Level,
-		entry.Message,
-		entry.Error,
-		entry.Fields,
-	)
+	audioLog := &models.AudioLog{
+		GuildID:   entry.GuildID,
+		Level:     entry.Level,
+		Message:   entry.Message,
+		Error:     entry.Error,
+		Fields:    entry.Fields,
+		Timestamp: time.Now(),
+	}
 	
 	// Ensure Fields map exists
 	if audioLog.Fields == nil {

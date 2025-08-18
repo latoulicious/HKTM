@@ -2,6 +2,7 @@ package embed
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -10,12 +11,14 @@ import (
 // AudioEmbeds implements AudioEmbedBuilder interface
 type AudioEmbeds struct {
 	baseColor int
+	botName   string
 }
 
-// NewAudioEmbedBuilder creates a new AudioEmbeds instance
+// NewAudioEmbedBuilder creates a new AudioEmbedBuilder
 func NewAudioEmbedBuilder() AudioEmbedBuilder {
 	return &AudioEmbeds{
-		baseColor: 0x7289da, // Discord blurple
+		baseColor: 0x0099ff,
+		botName:   "Hokko Tarumae",
 	}
 }
 
@@ -26,6 +29,9 @@ func (a *AudioEmbeds) Success(title, description string) *discordgo.MessageEmbed
 		Description: description,
 		Color:       0x00ff00, // Green
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
@@ -36,6 +42,9 @@ func (a *AudioEmbeds) Error(title, description string) *discordgo.MessageEmbed {
 		Description: description,
 		Color:       0xff0000, // Red
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
@@ -44,8 +53,11 @@ func (a *AudioEmbeds) Info(title, description string) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
-		Color:       a.baseColor, // Discord blurple
+		Color:       a.baseColor,
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
@@ -54,139 +66,209 @@ func (a *AudioEmbeds) Warning(title, description string) *discordgo.MessageEmbed
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
-		Color:       0xffaa00, // Orange
+		Color:       0xffa500, // Orange
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
-// NowPlaying creates an embed for currently playing audio
+// NowPlaying creates a now playing embed
 func (a *AudioEmbeds) NowPlaying(title, url string, duration time.Duration) *discordgo.MessageEmbed {
-	description := fmt.Sprintf("[%s](%s)", title, url)
-
 	embed := &discordgo.MessageEmbed{
 		Title:       "🎵 Now Playing",
-		Description: description,
+		Description: fmt.Sprintf("[%s](%s)", title, url),
 		Color:       0x00ff00, // Green
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 
 	if duration > 0 {
 		embed.Fields = []*discordgo.MessageEmbedField{
-			{
-				Name:   "Duration",
-				Value:  formatDuration(duration),
-				Inline: true,
-			},
+			{Name: "Duration", Value: formatDuration(duration), Inline: true},
 		}
 	}
 
 	return embed
 }
 
-// QueueStatus creates an embed showing the current queue status
-func (a *AudioEmbeds) QueueStatus(current string, queue []string) *discordgo.MessageEmbed {
+// QueueStatus creates a queue status embed
+func (a *AudioEmbeds) QueueStatus(current string, queue []string, queueSize int) *discordgo.MessageEmbed {
 	embed := &discordgo.MessageEmbed{
-		Title:     "📋 Queue Status",
+		Title:     "🎵 Music Queue",
 		Color:     a.baseColor,
 		Timestamp: time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 
+	var fields []*discordgo.MessageEmbedField
+
+	// Show currently playing
 	if current != "" {
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   "🎵 Currently Playing",
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "🎶 Now Playing",
 			Value:  current,
 			Inline: false,
 		})
 	}
 
+	// Show queue items
 	if len(queue) > 0 {
-		queueText := ""
-		maxItems := 10 // Limit to prevent embed from being too long
-
+		var queueText strings.Builder
 		for i, item := range queue {
-			if i >= maxItems {
-				queueText += fmt.Sprintf("... and %d more", len(queue)-maxItems)
+			if i >= 10 { // Limit to first 10 items to avoid embed limits
+				queueText.WriteString(fmt.Sprintf("... and %d more songs\n", len(queue)-10))
 				break
 			}
-			queueText += fmt.Sprintf("%d. %s\n", i+1, item)
+			queueText.WriteString(fmt.Sprintf("%d. %s\n", i+1, item))
 		}
 
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   "📝 Up Next",
-			Value:  queueText,
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "📋 Up Next",
+			Value:  queueText.String(),
 			Inline: false,
 		})
-	} else if current == "" {
-		embed.Description = "Queue is empty"
+	} else {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "📋 Up Next",
+			Value:  "No songs in queue.",
+			Inline: false,
+		})
 	}
 
+	// Add queue size info
+	fields = append(fields, &discordgo.MessageEmbedField{
+		Name:   "📊 Queue Info",
+		Value:  fmt.Sprintf("Total songs: %d", queueSize),
+		Inline: true,
+	})
+
+	embed.Fields = fields
 	return embed
 }
 
-// PlaybackError creates an embed for playback errors
+// PlaybackError creates a playback error embed
 func (a *AudioEmbeds) PlaybackError(url string, err error) *discordgo.MessageEmbed {
-	description := fmt.Sprintf("Failed to play: %s", url)
-
-	embed := &discordgo.MessageEmbed{
+	return &discordgo.MessageEmbed{
 		Title:       "❌ Playback Error",
-		Description: description,
+		Description: fmt.Sprintf("Failed to play: %s", url),
 		Color:       0xff0000, // Red
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "Error", Value: err.Error(), Inline: false},
+		},
 	}
-
-	if err != nil {
-		errorMsg := err.Error()
-		// Truncate very long error messages
-		if len(errorMsg) > 1000 {
-			errorMsg = errorMsg[:997] + "..."
-		}
-
-		embed.Fields = []*discordgo.MessageEmbedField{
-			{
-				Name:   "Error Details",
-				Value:  errorMsg,
-				Inline: false,
-			},
-		}
-	}
-
-	return embed
 }
 
-// QueueEmpty creates an embed for when the queue becomes empty
-func (a *AudioEmbeds) QueueEmpty() *discordgo.MessageEmbed {
+// IdleTimeout creates an idle timeout embed
+func (a *AudioEmbeds) IdleTimeout() *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
-		Title:       "📭 Queue Empty",
-		Description: "The music queue is now empty. Add more songs to continue playing!",
-		Color:       0xffaa00, // Orange
+		Title:       "⏰ Idle Timeout",
+		Description: "Bot has been idle for 5 minutes. Disconnected from voice channel to preserve resources.\nUse `/play` to start playing again!",
+		Color:       0xffa500, // Orange
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
-// AudioStopped creates an embed for when audio playback is stopped
-func (a *AudioEmbeds) AudioStopped() *discordgo.MessageEmbed {
+// QueueEnded creates a queue ended embed
+func (a *AudioEmbeds) QueueEnded() *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
-		Title:       "⏹️ Playback Stopped",
-		Description: "Audio playback has been stopped.",
+		Title:       "📭 Queue Ended",
+		Description: "All songs in the queue have been played. Add more songs with `/play` or `/queue add`!",
 		Color:       0x808080, // Gray
 		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
 	}
 }
 
-// formatDuration formats a duration into a human-readable string
+// SongFinished creates a song finished embed
+func (a *AudioEmbeds) SongFinished(title, requestedBy string) *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:     "🎵 Song Finished",
+		Color:     0x00ff00, // Green
+		Timestamp: time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "Finished Playing",
+				Value:  fmt.Sprintf("**%s**\nRequested by: %s", title, requestedBy),
+				Inline: false,
+			},
+		},
+	}
+}
+
+// SongSkipped creates a song skipped embed
+func (a *AudioEmbeds) SongSkipped(title, requestedBy, skippedBy string) *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:     "⏭️ Song Skipped",
+		Color:     0xffa500, // Orange
+		Timestamp: time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "Skipped Song",
+				Value:  fmt.Sprintf("**%s**\nRequested by: %s", title, requestedBy),
+				Inline: false,
+			},
+			{
+				Name:   "Skipped By",
+				Value:  skippedBy,
+				Inline: false,
+			},
+		},
+	}
+}
+
+// PlaybackStopped creates a playback stopped embed
+func (a *AudioEmbeds) PlaybackStopped(stoppedBy string) *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:       "⏹️ Playback Stopped",
+		Description: "Music playback has been stopped. Use `/play` to start playing again!",
+		Color:       0xff0000, // Red
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: a.botName,
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "Stopped By",
+				Value:  stoppedBy,
+				Inline: false,
+			},
+		},
+	}
+}
+
+// formatDuration formats a duration for display
 func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%.0fs", d.Seconds())
+	if d == 0 {
+		return "Unknown"
 	}
-
-	minutes := int(d.Minutes())
+	
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
 	seconds := int(d.Seconds()) % 60
-
-	if minutes < 60 {
-		return fmt.Sprintf("%d:%02d", minutes, seconds)
+	
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 	}
-
-	hours := minutes / 60
-	minutes = minutes % 60
-	return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }

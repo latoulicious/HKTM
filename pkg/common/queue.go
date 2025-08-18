@@ -8,6 +8,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/pkg/audio"
+	"github.com/latoulicious/HKTM/pkg/embed"
 	"github.com/latoulicious/HKTM/pkg/logging"
 	"gorm.io/gorm"
 )
@@ -26,30 +27,30 @@ type QueueItem struct {
 
 // MusicQueue manages the queue for a specific guild
 type MusicQueue struct {
-	guildID    string
-	items      []*QueueItem
-	current    *QueueItem
-	isPlaying  bool
-	wasSkipped bool // Flag to track if current song was skipped
-	mu         sync.RWMutex
-	voiceConn  *discordgo.VoiceConnection
-	pipeline   audio.AudioPipeline // Updated to use new AudioPipeline interface
-	logger     logging.Logger      // Centralized logging
-	db         *gorm.DB           // Database connection for pipeline creation
+	guildID      string
+	items        []*QueueItem
+	current      *QueueItem
+	isPlaying    bool
+	wasSkipped   bool // Flag to track if current song was skipped
+	mu           sync.RWMutex
+	voiceConn    *discordgo.VoiceConnection
+	pipeline     audio.AudioPipeline // Updated to use new AudioPipeline interface
+	logger       logging.Logger      // Centralized logging
+	db           *gorm.DB           // Database connection for pipeline creation
+	embedBuilder embed.AudioEmbedBuilder // Centralized embeds for queue status
 }
 
 // NewMusicQueue creates a new music queue for a guild
 func NewMusicQueue(guildID string) *MusicQueue {
 	// Create centralized logger for queue operations
 	loggerFactory := logging.GetGlobalLoggerFactory()
-	logger := loggerFactory.CreateLogger("queue").WithContext(map[string]interface{}{
-		"guild_id": guildID,
-	})
+	logger := loggerFactory.CreateQueueLogger(guildID)
 
 	return &MusicQueue{
-		guildID: guildID,
-		items:   make([]*QueueItem, 0),
-		logger:  logger,
+		guildID:      guildID,
+		items:        make([]*QueueItem, 0),
+		logger:       logger,
+		embedBuilder: embed.GetGlobalAudioEmbedBuilder(),
 	}
 }
 
@@ -57,15 +58,14 @@ func NewMusicQueue(guildID string) *MusicQueue {
 func NewMusicQueueWithDB(guildID string, db *gorm.DB) *MusicQueue {
 	// Create centralized logger for queue operations
 	loggerFactory := logging.GetGlobalLoggerFactory()
-	logger := loggerFactory.CreateLogger("queue").WithContext(map[string]interface{}{
-		"guild_id": guildID,
-	})
+	logger := loggerFactory.CreateQueueLogger(guildID)
 
 	return &MusicQueue{
-		guildID: guildID,
-		items:   make([]*QueueItem, 0),
-		logger:  logger,
-		db:      db,
+		guildID:      guildID,
+		items:        make([]*QueueItem, 0),
+		logger:       logger,
+		db:           db,
+		embedBuilder: embed.GetGlobalAudioEmbedBuilder(),
 	}
 }
 
@@ -459,4 +459,84 @@ func (mq *MusicQueue) SetDB(db *gorm.DB) {
 			"has_db": db != nil,
 		})
 	}
+}
+
+// GetQueueStatusEmbed creates a centralized embed for queue status
+func (mq *MusicQueue) GetQueueStatusEmbed() *discordgo.MessageEmbed {
+	mq.mu.RLock()
+	defer mq.mu.RUnlock()
+	
+	// Get current song info
+	var currentSong string
+	if mq.current != nil {
+		currentSong = fmt.Sprintf("**%s** (Requested by: %s)", mq.current.Title, mq.current.RequestedBy)
+	}
+	
+	// Get queue items as strings
+	queueItems := make([]string, len(mq.items))
+	for i, item := range mq.items {
+		queueItems[i] = fmt.Sprintf("**%s** (Requested by: %s)", item.Title, item.RequestedBy)
+	}
+	
+	// Log queue status request
+	mq.logger.Debug("Generated queue status embed", map[string]interface{}{
+		"current_song": currentSong,
+		"queue_size":   len(mq.items),
+		"is_playing":   mq.isPlaying,
+	})
+	
+	return mq.embedBuilder.QueueStatus(currentSong, queueItems, len(mq.items))
+}
+
+// GetDetailedStatus returns detailed queue status information
+func (mq *MusicQueue) GetDetailedStatus() map[string]interface{} {
+	mq.mu.RLock()
+	defer mq.mu.RUnlock()
+	
+	status := map[string]interface{}{
+		"guild_id":         mq.guildID,
+		"queue_size":       len(mq.items),
+		"is_playing":       mq.isPlaying,
+		"has_pipeline":     mq.pipeline != nil,
+		"pipeline_playing": mq.pipeline != nil && mq.pipeline.IsPlaying(),
+		"has_voice_conn":   mq.voiceConn != nil,
+		"was_skipped":      mq.wasSkipped,
+	}
+	
+	if mq.current != nil {
+		status["current_song"] = map[string]interface{}{
+			"title":        mq.current.Title,
+			"url":          mq.current.URL,
+			"requested_by": mq.current.RequestedBy,
+			"started_at":   mq.current.StartedAt,
+			"duration":     mq.current.Duration,
+		}
+	}
+	
+	// Log status request
+	mq.logger.Debug("Generated detailed queue status", status)
+	
+	return status
+}
+
+// LogQueueOperation logs queue operations with centralized logging
+func (mq *MusicQueue) LogQueueOperation(operation string, details map[string]interface{}) {
+	if mq.logger == nil {
+		return
+	}
+	
+	// Merge operation details with queue context
+	logFields := map[string]interface{}{
+		"operation":   operation,
+		"queue_size":  len(mq.items),
+		"is_playing":  mq.isPlaying,
+		"has_pipeline": mq.pipeline != nil,
+	}
+	
+	// Add provided details
+	for k, v := range details {
+		logFields[k] = v
+	}
+	
+	mq.logger.Info("Queue operation", logFields)
 }

@@ -1,42 +1,24 @@
 package embed
 
-// DefaultEmbedFactory implements EmbedFactory interface
-type DefaultEmbedFactory struct{}
+// Factory functions for creating embed builders
 
-// NewEmbedFactory creates a new DefaultEmbedFactory instance
-func NewEmbedFactory() EmbedFactory {
-	return &DefaultEmbedFactory{}
+// NewAudioEmbeds creates a new AudioEmbeds instance
+func NewAudioEmbeds() *AudioEmbeds {
+	return &AudioEmbeds{
+		baseColor: 0x0099ff,
+		botName:   "Hokko Tarumae",
+	}
 }
 
-// CreateAudioEmbedBuilder creates an AudioEmbedBuilder instance
-func (f *DefaultEmbedFactory) CreateAudioEmbedBuilder() AudioEmbedBuilder {
-	return NewAudioEmbedBuilder()
+// GetGlobalAudioEmbedBuilder returns a global instance of AudioEmbedBuilder
+// This can be used across the application for consistent embed styling
+var globalAudioEmbedBuilder AudioEmbedBuilder
+
+func init() {
+	globalAudioEmbedBuilder = NewAudioEmbedBuilder()
 }
 
-// CreateBasicEmbedBuilder creates a basic EmbedBuilder instance
-func (f *DefaultEmbedFactory) CreateBasicEmbedBuilder() EmbedBuilder {
-	return NewAudioEmbedBuilder() // AudioEmbeds implements EmbedBuilder interface
-}
-
-// Global factory instance for convenience
-var globalFactory EmbedFactory = NewEmbedFactory()
-
-// CreateAudioEmbeds creates an AudioEmbedBuilder using the global factory
-func CreateAudioEmbeds() AudioEmbedBuilder {
-	return globalFactory.CreateAudioEmbedBuilder()
-}
-
-// CreateBasicEmbeds creates a basic EmbedBuilder using the global factory
-func CreateBasicEmbeds() EmbedBuilder {
-	return globalFactory.CreateBasicEmbedBuilder()
-}
-
-// CreateErrorEmbeds creates an error-specific EmbedBuilder
-func CreateErrorEmbeds() EmbedBuilder {
-	return NewErrorEmbedBuilder()
-}
-
-// CreateSuccessEmbeds creates a success-specific EmbedBuilder
-func CreateSuccessEmbeds() EmbedBuilder {
-	return NewSuccessEmbedBuilder()
+// GetGlobalAudioEmbedBuilder returns the global AudioEmbedBuilder instance
+func GetGlobalAudioEmbedBuilder() AudioEmbedBuilder {
+	return globalAudioEmbedBuilder
 }

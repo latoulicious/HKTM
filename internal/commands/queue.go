@@ -10,6 +10,8 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/presence"
 	"github.com/latoulicious/HKTM/pkg/common"
+	"github.com/latoulicious/HKTM/pkg/embed"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"gorm.io/gorm"
 )
 
@@ -24,9 +26,12 @@ var (
 	// Global presence manager
 	presenceManager *presence.PresenceManager
 
-	// Idle tracking
-	lastActivityTime = make(map[string]time.Time)
-	idleMutex        sync.RWMutex
+	// Enhanced timeout manager
+	timeoutManager *common.TimeoutManager
+
+	// Centralized embed builder and logger
+	embedBuilder embed.AudioEmbedBuilder
+	logger       logging.Logger
 )
 
 // SetPresenceManager sets the global presence manager
@@ -34,84 +39,65 @@ func SetPresenceManager(pm *presence.PresenceManager) {
 	presenceManager = pm
 }
 
-// updateActivity updates the last activity time for a guild
-func updateActivity(guildID string) {
-	idleMutex.Lock()
-	lastActivityTime[guildID] = time.Now()
-	idleMutex.Unlock()
-}
-
-// sendIdleDisconnectEmbed sends an embed when the bot disconnects due to idle timeout
-func sendIdleDisconnectEmbed(s *discordgo.Session, channelID string) {
-	embed := &discordgo.MessageEmbed{
-		Title:     "⏰ Idle Timeout",
-		Color:     0xffa500, // Orange
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-		Description: "Bot has been idle for 5 minutes. Disconnected from voice channel to preserve resources.\nUse `!play` to start playing again!",
+// InitializeEnhancedTimeout initializes the enhanced timeout system
+func InitializeEnhancedTimeout(session *discordgo.Session) {
+	// Initialize centralized systems
+	embedBuilder = embed.GetGlobalAudioEmbedBuilder()
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger = loggerFactory.CreateLogger("queue-commands")
+	
+	// Create timeout manager with presence manager interface
+	var pm common.PresenceManager
+	if presenceManager != nil {
+		pm = &presenceManagerAdapter{presenceManager}
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
+	
+	// Create queue getter adapter
+	queueGetter := &queueGetterAdapter{}
+	
+	timeoutManager = common.NewTimeoutManager(session, pm, queueGetter)
+	timeoutManager.StartMonitoring()
+	
+	logger.Info("Enhanced timeout system initialized", map[string]interface{}{
+		"has_presence_manager": presenceManager != nil,
+	})
 }
 
-// startIdleMonitor starts monitoring for idle timeouts
-func startIdleMonitor(s *discordgo.Session) {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
-		defer ticker.Stop()
-
-		for range ticker.C {
-			now := time.Now()
-			idleMutex.RLock()
-
-			for guildID, lastActivity := range lastActivityTime {
-				// Check if more than 5 minutes have passed since last activity
-				if now.Sub(lastActivity) > 5*time.Minute {
-					// Get queue for this guild
-					queue := getQueue(guildID)
-					if queue != nil && queue.IsPlaying() {
-						// Stop the queue and clean up resources
-						queue.StopAndCleanup()
-
-						// Clear presence
-						if presenceManager != nil {
-							presenceManager.ClearMusicPresence()
-						}
-
-						// Find a text channel to send the embed
-						// We'll use the first available text channel
-						guild, err := s.Guild(guildID)
-						if err == nil && guild != nil {
-							channels, err := s.GuildChannels(guildID)
-							if err == nil {
-								for _, channel := range channels {
-									if channel.Type == discordgo.ChannelTypeGuildText {
-										sendIdleDisconnectEmbed(s, channel.ID)
-										break
-									}
-								}
-							}
-						}
-
-						// Remove from idle tracking
-						idleMutex.RUnlock()
-						idleMutex.Lock()
-						delete(lastActivityTime, guildID)
-						idleMutex.Unlock()
-						idleMutex.RLock()
-					}
-				}
-			}
-
-			idleMutex.RUnlock()
-		}
-	}()
+// presenceManagerAdapter adapts the internal presence manager to the common interface
+type presenceManagerAdapter struct {
+	pm *presence.PresenceManager
 }
 
-// GetIdleMonitor returns the idle monitor function
+func (pma *presenceManagerAdapter) ClearMusicPresence() {
+	if pma.pm != nil {
+		pma.pm.ClearMusicPresence()
+	}
+}
+
+// queueGetterAdapter adapts the internal queue management to the common interface
+type queueGetterAdapter struct{}
+
+func (qga *queueGetterAdapter) GetQueue(guildID string) *common.MusicQueue {
+	return getQueue(guildID)
+}
+
+// updateActivity updates the last activity time for a guild using enhanced timeout manager
+func updateActivity(guildID string) {
+	if timeoutManager != nil {
+		timeoutManager.UpdateActivity(guildID)
+	}
+	
+	// Log activity update
+	if logger != nil {
+		logger.Debug("Updated activity for guild", map[string]interface{}{
+			"guild_id": guildID,
+		})
+	}
+}
+
+// GetIdleMonitor returns the enhanced idle monitor initialization function
 func GetIdleMonitor() func(*discordgo.Session) {
-	return startIdleMonitor
+	return InitializeEnhancedTimeout
 }
 
 // QueueCommand handles the queue command
@@ -146,98 +132,83 @@ func QueueCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 	}
 }
 
-// sendEmbedMessage is a helper function to send embed messages
+// sendEmbedMessage is a helper function to send embed messages using centralized embeds
 func sendEmbedMessage(s *discordgo.Session, channelID, title, description string, color int) {
-	embed := &discordgo.MessageEmbed{
-		Title:       title,
-		Description: description,
-		Color:       color,
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
+	var embed *discordgo.MessageEmbed
+	
+	// Use centralized embed builder based on color
+	switch color {
+	case 0x00ff00: // Green - Success
+		embed = embedBuilder.Success(title, description)
+	case 0xff0000: // Red - Error
+		embed = embedBuilder.Error(title, description)
+	case 0xffa500: // Orange - Warning
+		embed = embedBuilder.Warning(title, description)
+	default: // Default - Info
+		embed = embedBuilder.Info(title, description)
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
+	
+	_, err := s.ChannelMessageSendEmbed(channelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send embed message", err, map[string]interface{}{
+			"channel_id": channelID,
+			"title":      title,
+		})
+	}
 }
 
-// sendSongFinishedEmbed sends an embed when a song finishes playing
+// sendSongFinishedEmbed sends an embed when a song finishes playing using centralized embeds
 func sendSongFinishedEmbed(s *discordgo.Session, channelID, songTitle, requestedBy string) {
-	embed := &discordgo.MessageEmbed{
-		Title:     "🎵 Song Finished",
-		Color:     0x00ff00, // Green
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Finished Playing",
-				Value:  fmt.Sprintf("**%s**\nRequested by: %s", songTitle, requestedBy),
-				Inline: false,
-			},
-		},
+	embed := embedBuilder.SongFinished(songTitle, requestedBy)
+	
+	_, err := s.ChannelMessageSendEmbed(channelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send song finished embed", err, map[string]interface{}{
+			"channel_id":   channelID,
+			"song_title":   songTitle,
+			"requested_by": requestedBy,
+		})
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
 }
 
-// sendQueueEndedEmbed sends an embed when the queue ends
+// sendQueueEndedEmbed sends an embed when the queue ends using centralized embeds
 func sendQueueEndedEmbed(s *discordgo.Session, channelID string) {
-	embed := &discordgo.MessageEmbed{
-		Title:     "📭 Queue Ended",
-		Color:     0x808080, // Gray
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-		Description: "All songs in the queue have been played. Add more songs with `!play` or `!queue add`!",
+	embed := embedBuilder.QueueEnded()
+	
+	_, err := s.ChannelMessageSendEmbed(channelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send queue ended embed", err, map[string]interface{}{
+			"channel_id": channelID,
+		})
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
 }
 
-// sendSongSkippedEmbed sends an embed when a song is skipped
+// sendSongSkippedEmbed sends an embed when a song is skipped using centralized embeds
 func sendSongSkippedEmbed(s *discordgo.Session, channelID, songTitle, requestedBy, skippedBy string) {
-	embed := &discordgo.MessageEmbed{
-		Title:     "⏭️ Song Skipped",
-		Color:     0xffa500, // Orange
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Skipped Song",
-				Value:  fmt.Sprintf("**%s**\nRequested by: %s", songTitle, requestedBy),
-				Inline: false,
-			},
-			{
-				Name:   "Skipped By",
-				Value:  skippedBy,
-				Inline: false,
-			},
-		},
+	embed := embedBuilder.SongSkipped(songTitle, requestedBy, skippedBy)
+	
+	_, err := s.ChannelMessageSendEmbed(channelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send song skipped embed", err, map[string]interface{}{
+			"channel_id":   channelID,
+			"song_title":   songTitle,
+			"requested_by": requestedBy,
+			"skipped_by":   skippedBy,
+		})
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
 }
 
-// sendBotStoppedEmbed sends an embed when the bot stops/disconnects
+// sendBotStoppedEmbed sends an embed when the bot stops/disconnects using centralized embeds
 func sendBotStoppedEmbed(s *discordgo.Session, channelID, stoppedBy string) {
-	embed := &discordgo.MessageEmbed{
-		Title:     "⏹️ Playback Stopped",
-		Color:     0xff0000, // Red
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Stopped By",
-				Value:  stoppedBy,
-				Inline: false,
-			},
-		},
-		Description: "Music playback has been stopped. Use `!play` to start playing again!",
+	embed := embedBuilder.PlaybackStopped(stoppedBy)
+	
+	_, err := s.ChannelMessageSendEmbed(channelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send playback stopped embed", err, map[string]interface{}{
+			"channel_id": channelID,
+			"stopped_by": stoppedBy,
+		})
 	}
-	s.ChannelMessageSendEmbed(channelID, embed)
 }
 
 // addToQueue adds a song to the queue
@@ -275,6 +246,16 @@ func addToQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 	queueSize := queue.Size()
 	description := fmt.Sprintf("✅ Added **%s** to queue (Position: %d)", title, queueSize)
 	sendEmbedMessage(s, m.ChannelID, "🎵 Song Added", description, 0x00ff00)
+	
+	// Log queue operation with centralized logging
+	queue.LogQueueOperation("song_added", map[string]interface{}{
+		"title":        title,
+		"url":          url,
+		"requested_by": m.Author.Username,
+		"user_id":      m.Author.ID,
+		"channel_id":   m.ChannelID,
+		"position":     queueSize,
+	})
 
 	// Check if we should start playing - only if the queue can start playing
 	if queue.CanStartPlaying() {
@@ -319,6 +300,13 @@ func removeFromQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []st
 	}
 
 	sendEmbedMessage(s, m.ChannelID, "✅ Success", "Removed song from queue.", 0x00ff00)
+	
+	// Log queue operation with centralized logging
+	queue.LogQueueOperation("song_removed", map[string]interface{}{
+		"index":      index + 1, // Convert back to 1-based for logging
+		"user_id":    m.Author.ID,
+		"channel_id": m.ChannelID,
+	})
 }
 
 // clearQueue clears the entire queue
@@ -335,11 +323,19 @@ func clearQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	queueSizeBefore := queue.Size()
 	queue.Clear()
 	sendEmbedMessage(s, m.ChannelID, "✅ Success", "Queue cleared.", 0x00ff00)
+	
+	// Log queue operation with centralized logging
+	queue.LogQueueOperation("queue_cleared", map[string]interface{}{
+		"items_cleared": queueSizeBefore,
+		"user_id":       m.Author.ID,
+		"channel_id":    m.ChannelID,
+	})
 }
 
-// showQueue shows the current queue
+// showQueue shows the current queue using centralized embeds and logging
 func showQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 	guildID := m.GuildID
 
@@ -350,53 +346,37 @@ func showQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if queue == nil || (queue.Size() == 0 && queue.Current() == nil) {
 		sendEmbedMessage(s, m.ChannelID, "📭 Queue Empty", "No songs in the queue.", 0x808080)
+		
+		// Log queue status request
+		if logger != nil {
+			logger.Info("Queue status requested - empty queue", map[string]interface{}{
+				"guild_id":   guildID,
+				"user_id":    m.Author.ID,
+				"channel_id": m.ChannelID,
+			})
+		}
 		return
 	}
 
-	// Create embed for queue display
-	embed := &discordgo.MessageEmbed{
-		Title:     "🎵 Music Queue",
-		Color:     0x0099ff,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
-		},
-	}
-
-	var fields []*discordgo.MessageEmbedField
-
-	// Show currently playing
-	if current := queue.Current(); current != nil {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "🎶 Now Playing",
-			Value:  fmt.Sprintf(current.Title),
-			Inline: false,
+	// Use centralized queue status embed
+	embed := queue.GetQueueStatusEmbed()
+	
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil && logger != nil {
+		logger.Error("Failed to send queue status embed", err, map[string]interface{}{
+			"guild_id":   guildID,
+			"channel_id": m.ChannelID,
+		})
+	} else if logger != nil {
+		// Log successful queue status display
+		logger.Info("Queue status displayed", map[string]interface{}{
+			"guild_id":     guildID,
+			"user_id":      m.Author.ID,
+			"channel_id":   m.ChannelID,
+			"queue_size":   queue.Size(),
+			"has_current":  queue.Current() != nil,
 		})
 	}
-
-	// Show queue items
-	items := queue.List()
-	if len(items) > 0 {
-		var queueText strings.Builder
-		for i, item := range items {
-			queueText.WriteString(fmt.Sprintf("%d. **%s** (Requested by: %s)\n", i+1, item.Title, item.RequestedBy))
-		}
-
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "📋 Up Next",
-			Value:  queueText.String(),
-			Inline: false,
-		})
-	} else {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "📋 Up Next",
-			Value:  "No songs in queue.",
-			Inline: false,
-		})
-	}
-
-	embed.Fields = fields
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
 }
 
 // startNextInQueue starts playing the next song in the queue
