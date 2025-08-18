@@ -216,6 +216,35 @@ func (al *AudioLoggerImpl) GetDatabaseFailures() int {
 	return al.dbFailures
 }
 
+// WithPipeline creates a new AudioLogger with pipeline-specific context
+func (al *AudioLoggerImpl) WithPipeline(pipeline string) AudioLogger {
+	// Create a new logger with pipeline context
+	pipelineLogger := al.logger.With(zap.String("pipeline", pipeline))
+	
+	return &AudioLoggerImpl{
+		logger:     pipelineLogger,
+		repository: al.repository,
+		guildID:    al.guildID,
+		config:     al.config,
+		dbFailures: al.dbFailures,
+	}
+}
+
+// WithContext creates a new AudioLogger with additional context fields
+func (al *AudioLoggerImpl) WithContext(ctx map[string]interface{}) AudioLogger {
+	// Convert context to zap fields
+	zapFields := al.convertFieldsToZap(ctx)
+	contextLogger := al.logger.With(zapFields...)
+	
+	return &AudioLoggerImpl{
+		logger:     contextLogger,
+		repository: al.repository,
+		guildID:    al.guildID,
+		config:     al.config,
+		dbFailures: al.dbFailures,
+	}
+}
+
 // Close gracefully shuts down the logger
 func (al *AudioLoggerImpl) Close() error {
 	if al.logger != nil {

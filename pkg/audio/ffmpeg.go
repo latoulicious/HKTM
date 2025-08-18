@@ -21,6 +21,7 @@ type FFmpegProcessor struct {
 	currentURL     string
 	mu             sync.RWMutex
 	logger         AudioLogger
+	pipelineLogger AudioLogger  // Pipeline-specific logger with context
 	processExited  chan struct{} // Channel to signal when process has exited
 	stderrBuffer   []string      // Buffer to store recent stderr lines for debugging
 	maxStderrLines int           // Maximum number of stderr lines to keep
@@ -28,9 +29,13 @@ type FFmpegProcessor struct {
 
 // NewFFmpegProcessor creates a new FFmpegProcessor instance
 func NewFFmpegProcessor(config *FFmpegConfig, logger AudioLogger) StreamProcessor {
+	// Create pipeline-specific logger context for FFmpeg operations
+	pipelineLogger := logger.WithPipeline("ffmpeg")
+	
 	return &FFmpegProcessor{
 		config:         config,
 		logger:         logger,
+		pipelineLogger: pipelineLogger,
 		maxStderrLines: 50, // Keep last 50 stderr lines for debugging
 	}
 }
@@ -40,13 +45,13 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
 
+	// Create pipeline-specific logger with URL context
+	urlLogger := fp.pipelineLogger
+	
 	// Stop any existing stream first
 	if fp.isRunning {
 		if err := fp.stopInternal(); err != nil {
-			fp.logger.Warn("Failed to stop existing stream before starting new one", map[string]interface{}{
-				"error": err.Error(),
-				"url":   url,
-			})
+			urlLogger.Warn("Failed to stop existing stream before starting new one", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 		}
 	}
 
@@ -55,21 +60,16 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	// First, get the direct stream URL using yt-dlp
 	streamURL, err := fp.getStreamURL(url)
 	if err != nil {
+		urlLogger.Error("Failed to get stream URL from yt-dlp", err, CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 		return nil, fmt.Errorf("failed to get stream URL: %w", err)
 	}
 
-	fp.logger.Debug("Got stream URL from yt-dlp", map[string]interface{}{
-		"original_url": url,
-		"stream_url":   streamURL,
-	})
+	urlLogger.Debug("Got stream URL from yt-dlp", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
 	// Build the FFmpeg command arguments with the direct stream URL
 	args := fp.buildFFmpegArgsWithStreamURL(streamURL)
 
-	fp.logger.Debug("Starting FFmpeg process", map[string]interface{}{
-		"url":  url,
-		"args": args,
-	})
+	urlLogger.Debug("Starting FFmpeg process", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
 	// Create the command
 	fp.cmd = exec.Command(fp.config.BinaryPath, args...)
@@ -110,10 +110,7 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	// Start monitoring the process in a separate goroutine
 	go fp.monitorProcess()
 
-	fp.logger.Info("FFmpeg stream started successfully", map[string]interface{}{
-		"url": url,
-		"pid": fp.cmd.Process.Pid,
-	})
+	urlLogger.Info("FFmpeg stream started successfully", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
 	return stdout, nil
 }
@@ -131,10 +128,7 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		return nil
 	}
 
-	fp.logger.Debug("Stopping FFmpeg process", map[string]interface{}{
-		"pid": fp.cmd.Process.Pid,
-		"url": fp.currentURL,
-	})
+	fp.pipelineLogger.Debug("Stopping FFmpeg process", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 
 	// Close pipes first to signal the process to stop
 	if fp.outputPipe != nil {
@@ -150,10 +144,7 @@ func (fp *FFmpegProcessor) stopInternal() error {
 	if fp.cmd.Process != nil {
 		// Send SIGTERM to the process group
 		if err := syscall.Kill(-fp.cmd.Process.Pid, syscall.SIGTERM); err != nil {
-			fp.logger.Warn("Failed to send SIGTERM to process group", map[string]interface{}{
-				"error": err.Error(),
-				"pid":   fp.cmd.Process.Pid,
-			})
+			fp.pipelineLogger.Warn("Failed to send SIGTERM to process group", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 		}
 
 		// Wait for graceful shutdown with timeout
@@ -165,19 +156,14 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		select {
 		case <-done:
 			// Process terminated gracefully
-			fp.logger.Debug("FFmpeg process terminated gracefully", map[string]interface{}{
-				"pid": fp.cmd.Process.Pid,
-			})
+			fp.pipelineLogger.Debug("FFmpeg process terminated gracefully", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 		case <-time.After(5 * time.Second):
 			// Force kill if graceful shutdown takes too long
-			fp.logger.Warn("FFmpeg process did not terminate gracefully, force killing", map[string]interface{}{
-				"pid":           fp.cmd.Process.Pid,
-				"recent_stderr": fp.getRecentStderr(),
-			})
+			contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+			contextFields["recent_stderr"] = fp.getRecentStderr()
+			fp.pipelineLogger.Warn("FFmpeg process did not terminate gracefully, force killing", contextFields)
 			if err := syscall.Kill(-fp.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-				fp.logger.Error("Failed to force kill process group", err, map[string]interface{}{
-					"pid": fp.cmd.Process.Pid,
-				})
+				fp.pipelineLogger.Error("Failed to force kill process group", err, CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 			}
 			<-done // Wait for the process to actually exit
 		}
@@ -194,7 +180,7 @@ func (fp *FFmpegProcessor) stopInternal() error {
 	fp.currentURL = ""
 	fp.stderrBuffer = nil
 
-	fp.logger.Info("FFmpeg process stopped", nil)
+	fp.pipelineLogger.Info("FFmpeg process stopped", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 	return nil
 }
 
@@ -207,16 +193,13 @@ func (fp *FFmpegProcessor) IsRunning() bool {
 
 // Restart stops the current stream and starts a new one with the given URL
 func (fp *FFmpegProcessor) Restart(url string) error {
-	fp.logger.Info("Restarting FFmpeg stream", map[string]interface{}{
-		"old_url": fp.currentURL,
-		"new_url": url,
-	})
+	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+	contextFields["old_url"] = fp.currentURL
+	fp.pipelineLogger.Info("Restarting FFmpeg stream", contextFields)
 
 	// Stop current stream
 	if err := fp.Stop(); err != nil {
-		fp.logger.Error("Failed to stop current stream during restart", err, map[string]interface{}{
-			"url": url,
-		})
+		fp.pipelineLogger.Error("Failed to stop current stream during restart", err, CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 		return fmt.Errorf("failed to stop current stream: %w", err)
 	}
 
@@ -227,9 +210,7 @@ func (fp *FFmpegProcessor) Restart(url string) error {
 
 // getStreamURL uses yt-dlp to extract the direct stream URL
 func (fp *FFmpegProcessor) getStreamURL(url string) (string, error) {
-	fp.logger.Debug("Getting stream URL with yt-dlp", map[string]interface{}{
-		"url": url,
-	})
+	fp.pipelineLogger.Debug("Getting stream URL with yt-dlp", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
 	// Run yt-dlp to get the direct stream URL
 	cmd := exec.Command("yt-dlp", "-f", "bestaudio", "--get-url", url)
@@ -272,9 +253,7 @@ func (fp *FFmpegProcessor) monitorStderr() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			fp.logger.Error("Panic in stderr monitor", fmt.Errorf("panic: %v", r), map[string]interface{}{
-				"url": fp.currentURL,
-			})
+			fp.pipelineLogger.Error("Panic in stderr monitor", fmt.Errorf("panic: %v", r), CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 		}
 	}()
 
@@ -292,38 +271,32 @@ func (fp *FFmpegProcessor) monitorStderr() {
 		fp.mu.Unlock()
 
 		// Log FFmpeg output for debugging
-		fp.logger.Debug("FFmpeg stderr", map[string]interface{}{
-			"output": line,
-			"url":    fp.currentURL,
-		})
+		contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+		contextFields["output"] = line
+		fp.pipelineLogger.Debug("FFmpeg stderr", contextFields)
 
 		// Check for specific error patterns
 		if fp.isErrorLine(line) {
-			fp.logger.Warn("FFmpeg error detected", map[string]interface{}{
-				"error": line,
-				"url":   fp.currentURL,
-			})
+			errorFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+			errorFields["error"] = line
+			fp.pipelineLogger.Warn("FFmpeg error detected", errorFields)
 		}
 
 		// Check for critical error patterns that might indicate process failure
 		if fp.isCriticalError(line) {
-			fp.logger.Error("FFmpeg critical error detected", fmt.Errorf("critical error: %s", line), map[string]interface{}{
-				"error": line,
-				"url":   fp.currentURL,
-			})
+			criticalFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+			criticalFields["error"] = line
+			fp.pipelineLogger.Error("FFmpeg critical error detected", fmt.Errorf("critical error: %s", line), criticalFields)
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		fp.logger.Error("Error reading FFmpeg stderr", err, map[string]interface{}{
-			"url":           fp.currentURL,
-			"recent_stderr": fp.getRecentStderr(),
-		})
+		contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+		contextFields["recent_stderr"] = fp.getRecentStderr()
+		fp.pipelineLogger.Error("Error reading FFmpeg stderr", err, contextFields)
 	}
 
-	fp.logger.Debug("FFmpeg stderr monitoring stopped", map[string]interface{}{
-		"url": fp.currentURL,
-	})
+	fp.pipelineLogger.Debug("FFmpeg stderr monitoring stopped", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 }
 
 // monitorProcess monitors the FFmpeg process and handles unexpected exits
@@ -334,9 +307,7 @@ func (fp *FFmpegProcessor) monitorProcess() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			fp.logger.Error("Panic in process monitor", fmt.Errorf("panic: %v", r), map[string]interface{}{
-				"url": fp.currentURL,
-			})
+			fp.pipelineLogger.Error("Panic in process monitor", fmt.Errorf("panic: %v", r), CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 		}
 	}()
 
@@ -356,15 +327,12 @@ func (fp *FFmpegProcessor) monitorProcess() {
 				exitCode = fp.cmd.ProcessState.ExitCode()
 			}
 
-			fp.logger.Error("FFmpeg process exited unexpectedly", err, map[string]interface{}{
-				"url":           fp.currentURL,
-				"exit_code":     exitCode,
-				"recent_stderr": fp.getRecentStderr(),
-			})
+			contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+			contextFields["exit_code"] = exitCode
+			contextFields["recent_stderr"] = fp.getRecentStderr()
+			fp.pipelineLogger.Error("FFmpeg process exited unexpectedly", err, contextFields)
 		} else {
-			fp.logger.Info("FFmpeg process completed normally", map[string]interface{}{
-				"url": fp.currentURL,
-			})
+			fp.pipelineLogger.Info("FFmpeg process completed normally", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 		}
 
 		// Clean up resources

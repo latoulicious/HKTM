@@ -156,3 +156,13 @@ func (sl *SimpleLogger) Warn(msg string, fields map[string]interface{}) {
 func (sl *SimpleLogger) Debug(msg string, fields map[string]interface{}) {
 	sl.calls = append(sl.calls, "DEBUG: "+msg)
 }
+
+func (sl *SimpleLogger) WithPipeline(pipeline string) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return sl
+}
+
+func (sl *SimpleLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return sl
+}

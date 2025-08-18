@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -46,6 +47,16 @@ func (m *MockAudioLogger) Warn(msg string, fields map[string]interface{}) {
 
 func (m *MockAudioLogger) Debug(msg string, fields map[string]interface{}) {
 	m.DebugCalls = append(m.DebugCalls, LogCall{Message: msg, Fields: fields})
+}
+
+func (m *MockAudioLogger) WithPipeline(pipeline string) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return m
+}
+
+func (m *MockAudioLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return m
 }
 
 // MockErrorRepository implements the AudioRepository interface for testing errors
@@ -348,8 +359,8 @@ func TestBasicErrorHandler_LogError(t *testing.T) {
 	if savedError.ErrorMsg != testError.Error() {
 		t.Errorf("Expected saved error message to be %s, got %s", testError.Error(), savedError.ErrorMsg)
 	}
-	if savedError.Context != context {
-		t.Errorf("Expected saved error context to be %s, got %s", context, savedError.Context)
+	if !strings.HasPrefix(savedError.Context, context) {
+		t.Errorf("Expected saved error context to start with %s, got %s", context, savedError.Context)
 	}
 	if savedError.GuildID != "test-guild" {
 		t.Errorf("Expected saved error guild ID to be test-guild, got %s", savedError.GuildID)

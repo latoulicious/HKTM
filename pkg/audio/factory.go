@@ -172,6 +172,24 @@ type AudioLoggerAdapter struct {
 	guildID string
 }
 
+// WithPipeline creates a new AudioLogger with pipeline-specific context
+func (a *AudioLoggerAdapter) WithPipeline(pipeline string) AudioLogger {
+	pipelineLogger := a.logger.WithPipeline(pipeline)
+	return &AudioLoggerAdapter{
+		logger:  pipelineLogger,
+		guildID: a.guildID,
+	}
+}
+
+// WithContext creates a new AudioLogger with additional context
+func (a *AudioLoggerAdapter) WithContext(ctx map[string]interface{}) AudioLogger {
+	contextLogger := a.logger.WithContext(ctx)
+	return &AudioLoggerAdapter{
+		logger:  contextLogger,
+		guildID: a.guildID,
+	}
+}
+
 // Info implements AudioLogger interface
 func (a *AudioLoggerAdapter) Info(msg string, fields map[string]interface{}) {
 	// Ensure guild_id is always present in fields for audio logging

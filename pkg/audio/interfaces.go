@@ -73,6 +73,10 @@ type AudioLogger interface {
 	Error(msg string, err error, fields map[string]interface{})
 	Warn(msg string, fields map[string]interface{})
 	Debug(msg string, fields map[string]interface{})
+	
+	// Pipeline context methods for centralized logging integration
+	WithPipeline(pipeline string) AudioLogger
+	WithContext(ctx map[string]interface{}) AudioLogger
 }
 
 // ConfigProvider manages configuration loading from multiple sources

@@ -35,6 +35,16 @@ func (m *MockAudioLogger) Debug(msg string, fields map[string]interface{}) {
 	m.logs = append(m.logs, LogEntry{Level: "DEBUG", Message: msg, Fields: fields})
 }
 
+func (m *MockAudioLogger) WithPipeline(pipeline string) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return m
+}
+
+func (m *MockAudioLogger) WithContext(ctx map[string]interface{}) audio.AudioLogger {
+	// Return the same mock for testing purposes
+	return m
+}
+
 func TestFFmpegProcessor_Creation(t *testing.T) {
 	config := &audio.FFmpegConfig{
 		BinaryPath:  "ffmpeg",
