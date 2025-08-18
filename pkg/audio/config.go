@@ -31,6 +31,12 @@ type FFmpegConfig struct {
 	CustomArgs  []string `yaml:"custom_args" toml:"custom_args" env:"AUDIO_FFMPEG_CUSTOM_ARGS"`
 }
 
+// YtDlpConfig contains yt-dlp-specific configuration
+type YtDlpConfig struct {
+	BinaryPath string   `yaml:"binary_path" toml:"binary_path" env:"AUDIO_YTDLP_BINARY"`
+	CustomArgs []string `yaml:"custom_args" toml:"custom_args" env:"AUDIO_YTDLP_CUSTOM_ARGS"`
+}
+
 // OpusConfig contains Opus encoder configuration
 type OpusConfig struct {
 	Bitrate   int `yaml:"bitrate" toml:"bitrate" env:"AUDIO_OPUS_BITRATE"`
@@ -81,6 +87,7 @@ type ErrorStats struct {
 type ConfigManager struct {
 	pipeline *PipelineConfig
 	ffmpeg   *FFmpegConfig
+	ytdlp    *YtDlpConfig
 	opus     *OpusConfig
 	retry    *RetryConfig
 	logger   *LoggerConfig
@@ -90,6 +97,7 @@ type ConfigManager struct {
 type AudioConfig struct {
 	Pipeline PipelineConfig `yaml:"pipeline" toml:"pipeline"`
 	FFmpeg   FFmpegConfig   `yaml:"ffmpeg" toml:"ffmpeg"`
+	YtDlp    YtDlpConfig    `yaml:"ytdlp" toml:"ytdlp"`
 	Opus     OpusConfig     `yaml:"opus" toml:"opus"`
 	Retry    RetryConfig    `yaml:"retry" toml:"retry"`
 	Logger   LoggerConfig   `yaml:"logger" toml:"logger"`
@@ -122,6 +130,7 @@ func NewConfigManager() (ConfigProvider, error) {
 	// Set the configuration in the manager
 	manager.pipeline = &config.Pipeline
 	manager.ffmpeg = &config.FFmpeg
+	manager.ytdlp = &config.YtDlp
 	manager.opus = &config.Opus
 	manager.retry = &config.Retry
 	manager.logger = &config.Logger
@@ -193,6 +202,12 @@ func (cm *ConfigManager) loadEnvConfig(config *AudioConfig) error {
 		CustomArgs:  getEnvStringSlice("AUDIO_FFMPEG_CUSTOM_ARGS", []string{"-reconnect", "1", "-reconnect_delay_max", "5"}),
 	}
 
+	// Load yt-dlp config from environment
+	config.YtDlp = YtDlpConfig{
+		BinaryPath: getEnvString("AUDIO_YTDLP_BINARY", "yt-dlp"),
+		CustomArgs: getEnvStringSlice("AUDIO_YTDLP_CUSTOM_ARGS", []string{"--no-playlist", "--extract-flat"}),
+	}
+
 	// Load Opus config from environment
 	config.Opus = OpusConfig{
 		Bitrate:   getEnvInt("AUDIO_OPUS_BITRATE", 128000),
@@ -234,6 +249,11 @@ func (cm *ConfigManager) setDefaults(config *AudioConfig) {
 		CustomArgs:  []string{"-reconnect", "1", "-reconnect_delay_max", "5"},
 	}
 
+	config.YtDlp = YtDlpConfig{
+		BinaryPath: "yt-dlp",
+		CustomArgs: []string{"--no-playlist", "--extract-flat"},
+	}
+
 	config.Opus = OpusConfig{
 		Bitrate:   128000,
 		FrameSize: 960,
@@ -261,6 +281,11 @@ func (cm *ConfigManager) GetPipelineConfig() *PipelineConfig {
 // GetFFmpegConfig returns the FFmpeg configuration
 func (cm *ConfigManager) GetFFmpegConfig() *FFmpegConfig {
 	return cm.ffmpeg
+}
+
+// GetYtDlpConfig returns the yt-dlp configuration
+func (cm *ConfigManager) GetYtDlpConfig() *YtDlpConfig {
+	return cm.ytdlp
 }
 
 // GetOpusConfig returns the Opus configuration
@@ -305,6 +330,11 @@ func (cm *ConfigManager) Validate() error {
 		return fmt.Errorf("invalid ffmpeg audio_format: %s", cm.ffmpeg.AudioFormat)
 	}
 
+	// Validate yt-dlp config
+	if cm.ytdlp.BinaryPath == "" {
+		return fmt.Errorf("yt-dlp binary_path cannot be empty")
+	}
+
 	// Validate Opus config
 	if cm.opus.Bitrate <= 0 {
 		return fmt.Errorf("opus bitrate must be positive, got %d", cm.opus.Bitrate)
@@ -336,6 +366,12 @@ func (cm *ConfigManager) Validate() error {
 	}
 
 	return nil
+}
+
+// ValidateDependencies validates that all required binary dependencies are available
+func (cm *ConfigManager) ValidateDependencies() error {
+	// Validate all binary dependencies using shared utilities
+	return ValidateAllBinaryDependencies(cm.ffmpeg.BinaryPath, cm.ytdlp.BinaryPath)
 }
 
 // Helper functions for environment variable parsing

@@ -51,16 +51,18 @@ type AudioPipelineController struct {
 	config          ConfigProvider
 
 	// State management only
-	state       PipelineState
-	currentURL  string
-	voiceConn   *discordgo.VoiceConnection
-	startTime   time.Time
-	errorCount  int
-	lastError   error
-	stopChan    chan struct{}
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancelFunc  context.CancelFunc
+	state         PipelineState
+	currentURL    string
+	voiceConn     *discordgo.VoiceConnection
+	startTime     time.Time
+	errorCount    int
+	lastError     error
+	stopChan      chan struct{}
+	mu            sync.RWMutex
+	ctx           context.Context
+	cancelFunc    context.CancelFunc
+	initialized   bool
+	shutdownOnce  sync.Once
 }
 
 // NewAudioPipelineController creates a new AudioPipelineController with injected dependencies
@@ -85,12 +87,143 @@ func NewAudioPipelineController(
 		stopChan:        make(chan struct{}),
 		ctx:             ctx,
 		cancelFunc:      cancel,
+		initialized:     false,
 	}
+}
+
+// Initialize initializes the audio pipeline and validates all dependencies
+// Implements the AudioPipeline interface
+func (c *AudioPipelineController) Initialize() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.initialized {
+		return nil // Already initialized
+	}
+
+	c.logger.Info("Initializing audio pipeline", CreateContextFieldsWithComponent("", "", "", "initialization"))
+
+	// Step 1: Validate configuration
+	if err := c.config.Validate(); err != nil {
+		c.logger.Error("Configuration validation failed", err, CreateContextFieldsWithComponent("", "", "", "config_validation"))
+		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Step 2: Validate binary dependencies
+	if err := c.config.ValidateDependencies(); err != nil {
+		c.logger.Error("Dependency validation failed", err, CreateContextFieldsWithComponent("", "", "", "dependency_validation"))
+		return fmt.Errorf("dependency validation failed: %w", err)
+	}
+
+	// Step 3: Initialize audio encoder
+	if err := c.audioEncoder.Initialize(); err != nil {
+		c.logger.Error("Audio encoder initialization failed", err, CreateContextFieldsWithComponent("", "", "", "encoder_init"))
+		return fmt.Errorf("audio encoder initialization failed: %w", err)
+	}
+
+	c.initialized = true
+	c.logger.Info("Audio pipeline initialized successfully", CreateContextFieldsWithComponent("", "", "", "initialization"))
+
+	return nil
+}
+
+// Shutdown gracefully shuts down the audio pipeline and cleans up all resources
+// Implements the AudioPipeline interface
+func (c *AudioPipelineController) Shutdown() error {
+	var shutdownErr error
+
+	c.shutdownOnce.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		if !c.initialized {
+			return // Not initialized, nothing to shutdown
+		}
+
+		c.logger.Info("Shutting down audio pipeline", CreateContextFieldsWithComponent("", "", "", "shutdown"))
+
+		// Step 1: Stop any active playback
+		if c.state == StatePlaying || c.state == StateStarting {
+			c.logger.Debug("Stopping active playback during shutdown", CreateContextFieldsWithComponent("", "", "", "shutdown"))
+			if err := c.stopPlaybackInternal(); err != nil {
+				c.logger.Error("Error stopping playback during shutdown", err, CreateContextFieldsWithComponent("", "", "", "shutdown"))
+				shutdownErr = fmt.Errorf("failed to stop playback during shutdown: %w", err)
+			}
+		}
+
+		// Step 2: Cancel context and close channels
+		c.cancelFunc()
+		if c.stopChan != nil {
+			select {
+			case <-c.stopChan:
+				// Already closed
+			default:
+				close(c.stopChan)
+			}
+		}
+
+		// Step 3: Shutdown components in reverse initialization order
+		var shutdownErrors []error
+
+		// Close audio encoder
+		if c.audioEncoder != nil {
+			if err := c.audioEncoder.Close(); err != nil {
+				shutdownErrors = append(shutdownErrors, fmt.Errorf("audio encoder shutdown failed: %w", err))
+			}
+		}
+
+		// Stop stream processor
+		if c.streamProcessor != nil {
+			if err := c.streamProcessor.Stop(); err != nil {
+				shutdownErrors = append(shutdownErrors, fmt.Errorf("stream processor shutdown failed: %w", err))
+			}
+		}
+
+		// Log any shutdown errors
+		if len(shutdownErrors) > 0 {
+			for _, err := range shutdownErrors {
+				c.logger.Error("Component shutdown error", err, CreateContextFieldsWithComponent("", "", "", "shutdown"))
+			}
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("component shutdown errors occurred: %d errors", len(shutdownErrors))
+			}
+		}
+
+		// Step 4: Reset state
+		c.state = StateStopped
+		c.currentURL = ""
+		c.startTime = time.Time{}
+		c.voiceConn = nil
+		c.errorCount = 0
+		c.lastError = nil
+		c.initialized = false
+
+		if shutdownErr == nil {
+			c.logger.Info("Audio pipeline shutdown completed successfully", CreateContextFieldsWithComponent("", "", "", "shutdown"))
+		} else {
+			c.logger.Error("Audio pipeline shutdown completed with errors", shutdownErr, CreateContextFieldsWithComponent("", "", "", "shutdown"))
+		}
+	})
+
+	return shutdownErr
+}
+
+// IsInitialized returns true if the pipeline has been successfully initialized
+// Implements the AudioPipeline interface
+func (c *AudioPipelineController) IsInitialized() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.initialized
 }
 
 // PlayURL starts playback of the given URL using the voice connection
 // Implements the AudioPipeline interface
 func (c *AudioPipelineController) PlayURL(url string, voiceConn *discordgo.VoiceConnection) error {
+	// Check if initialized
+	if !c.IsInitialized() {
+		return fmt.Errorf("pipeline not initialized - call Initialize() first")
+	}
+
 	// Validate using shared utility
 	if err := ValidateURL(url); err != nil {
 		c.logger.Error("URL validation failed", err, CreateContextFields("", "", url))
@@ -116,6 +249,11 @@ func (c *AudioPipelineController) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	return c.stopPlaybackInternal()
+}
+
+// stopPlaybackInternal stops the current playback - must be called with mutex held
+func (c *AudioPipelineController) stopPlaybackInternal() error {
 	if c.state == StateStopped {
 		return nil // Already stopped
 	}
@@ -123,7 +261,14 @@ func (c *AudioPipelineController) Stop() error {
 	c.logger.Info("Stopping audio pipeline", CreateContextFields("", "", c.currentURL))
 
 	// Signal stop to all goroutines
-	close(c.stopChan)
+	if c.stopChan != nil {
+		select {
+		case <-c.stopChan:
+			// Already closed
+		default:
+			close(c.stopChan)
+		}
+	}
 	c.cancelFunc()
 
 	// Stop components in reverse order
@@ -136,7 +281,7 @@ func (c *AudioPipelineController) Stop() error {
 		}
 	}
 
-	// Close audio encoder
+	// Close audio encoder (but don't fully shutdown - just close current session)
 	if c.audioEncoder != nil {
 		if err := c.audioEncoder.Close(); err != nil {
 			stopErrors = append(stopErrors, fmt.Errorf("audio encoder close failed: %w", err))

@@ -10,10 +10,16 @@ import (
 
 // AudioPipeline is the main interface for the audio pipeline controller
 type AudioPipeline interface {
+	// Core playback operations
 	PlayURL(url string, voiceConn *discordgo.VoiceConnection) error
 	Stop() error
 	IsPlaying() bool
 	GetStatus() PipelineStatus
+	
+	// Lifecycle management
+	Initialize() error
+	Shutdown() error
+	IsInitialized() bool
 }
 
 // StreamProcessor handles the FFmpeg process and audio stream generation
@@ -73,10 +79,12 @@ type AudioLogger interface {
 type ConfigProvider interface {
 	GetPipelineConfig() *PipelineConfig
 	GetFFmpegConfig() *FFmpegConfig
+	GetYtDlpConfig() *YtDlpConfig
 	GetOpusConfig() *OpusConfig
 	GetRetryConfig() *RetryConfig
 	GetLoggerConfig() *LoggerConfig
 	Validate() error
+	ValidateDependencies() error
 }
 
 // MetricsCollector handles performance metrics collection

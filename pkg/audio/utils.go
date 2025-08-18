@@ -3,6 +3,7 @@ package audio
 import (
 	"fmt"
 	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -191,4 +192,82 @@ func CreateAudioError(guildID, errorType, errorMsg, context string) *models.Audi
 		Timestamp: time.Now(),
 		Resolved:  false,
 	}
+}
+
+// ValidateBinaryDependency validates that a required binary is available and executable
+// Used by Factory, ConfigProvider for dependency validation
+func ValidateBinaryDependency(binaryName, binaryPath string) error {
+	if binaryPath == "" {
+		return fmt.Errorf("%s binary path cannot be empty", binaryName)
+	}
+
+	// Check if binary exists and is executable
+	_, err := exec.LookPath(binaryPath)
+	if err != nil {
+		return fmt.Errorf("%s binary not found at path '%s': %w", binaryName, binaryPath, err)
+	}
+
+	return nil
+}
+
+// ValidateFFmpegBinary validates FFmpeg binary and basic functionality
+// Used by Factory, StreamProcessor for FFmpeg validation
+func ValidateFFmpegBinary(binaryPath string) error {
+	if err := ValidateBinaryDependency("ffmpeg", binaryPath); err != nil {
+		return err
+	}
+
+	// Test basic FFmpeg functionality with version check
+	cmd := exec.Command(binaryPath, "-version")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("ffmpeg binary validation failed - unable to get version: %w", err)
+	}
+
+	// Check if output contains expected FFmpeg version information
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "ffmpeg version") {
+		return fmt.Errorf("ffmpeg binary validation failed - unexpected version output")
+	}
+
+	return nil
+}
+
+// ValidateYtDlpBinary validates yt-dlp binary and basic functionality
+// Used by Factory, StreamProcessor for yt-dlp validation
+func ValidateYtDlpBinary(binaryPath string) error {
+	if err := ValidateBinaryDependency("yt-dlp", binaryPath); err != nil {
+		return err
+	}
+
+	// Test basic yt-dlp functionality with version check
+	cmd := exec.Command(binaryPath, "--version")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("yt-dlp binary validation failed - unable to get version: %w", err)
+	}
+
+	// Check if output contains version information (yt-dlp outputs just the version number)
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr == "" {
+		return fmt.Errorf("yt-dlp binary validation failed - empty version output")
+	}
+
+	return nil
+}
+
+// ValidateAllBinaryDependencies validates all required binary dependencies
+// Used by Factory for comprehensive dependency validation
+func ValidateAllBinaryDependencies(ffmpegPath, ytDlpPath string) error {
+	// Validate FFmpeg
+	if err := ValidateFFmpegBinary(ffmpegPath); err != nil {
+		return fmt.Errorf("FFmpeg validation failed: %w", err)
+	}
+
+	// Validate yt-dlp
+	if err := ValidateYtDlpBinary(ytDlpPath); err != nil {
+		return fmt.Errorf("yt-dlp validation failed: %w", err)
+	}
+
+	return nil
 }

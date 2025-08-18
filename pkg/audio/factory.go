@@ -18,14 +18,26 @@ func NewAudioPipelineWithDependencies(db *gorm.DB, guildID string) (AudioPipelin
 		return nil, fmt.Errorf("config creation failed: %w", err)
 	}
 
-	// Step 2: Create repository (depends on database only)
+	// Step 2: Validate configuration and dependencies early
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	if err := config.ValidateDependencies(); err != nil {
+		return nil, fmt.Errorf("dependency validation failed: %w", err)
+	}
+
+	// Step 3: Create repository (depends on database only)
 	repo := createRepository(db)
 
-	// Step 3: Create centralized logging factory and logger (depends on repository)
+	// Step 4: Create centralized logging factory and logger (depends on repository)
 	loggerFactory := createLoggerFactory(repo)
 	logger := createAudioLogger(loggerFactory, guildID)
 
-	// Step 4: Create individual components with interface injection only
+	// Log successful dependency validation
+	logger.Info("Binary dependencies validated successfully", CreateContextFieldsWithComponent(guildID, "", "", "factory"))
+
+	// Step 5: Create individual components with interface injection only
 	processor, err := createStreamProcessor(config, logger)
 	if err != nil {
 		return nil, fmt.Errorf("stream processor creation failed: %w", err)
@@ -39,8 +51,15 @@ func NewAudioPipelineWithDependencies(db *gorm.DB, guildID string) (AudioPipelin
 	errorHandler := createErrorHandler(config, logger, repo, guildID)
 	metrics := createMetricsCollector(repo, guildID)
 
-	// Step 5: Wire controller with all interfaces
+	// Step 6: Wire controller with all interfaces
 	controller := createPipelineController(processor, encoder, errorHandler, metrics, logger, config)
+
+	// Step 7: Initialize the pipeline
+	if err := controller.Initialize(); err != nil {
+		return nil, fmt.Errorf("pipeline initialization failed: %w", err)
+	}
+
+	logger.Info("Audio pipeline created and initialized successfully", CreateContextFieldsWithComponent(guildID, "", "", "factory"))
 
 	return controller, nil
 }
@@ -212,6 +231,11 @@ var (
 		CustomArgs:  []string{"-reconnect", "1", "-reconnect_delay_max", "5"},
 	}
 
+	DefaultYtDlpConfig = &YtDlpConfig{
+		BinaryPath: "yt-dlp",
+		CustomArgs: []string{"--no-playlist", "--extract-flat"},
+	}
+
 	DefaultOpusConfig = &OpusConfig{
 		Bitrate:   128000,
 		FrameSize: 960,
@@ -230,3 +254,24 @@ var (
 		SaveToDB: true,
 	}
 )
+
+// ShutdownAudioPipeline gracefully shuts down an audio pipeline
+// This function should be called during application shutdown to ensure proper cleanup
+func ShutdownAudioPipeline(pipeline AudioPipeline) error {
+	if pipeline == nil {
+		return nil
+	}
+
+	if !pipeline.IsInitialized() {
+		return nil // Not initialized, nothing to shutdown
+	}
+
+	return pipeline.Shutdown()
+}
+
+// ValidateSystemDependencies validates that all required system dependencies are available
+// This function can be called during application startup to ensure the system is ready
+func ValidateSystemDependencies() error {
+	// Use default binary paths for validation
+	return ValidateAllBinaryDependencies("ffmpeg", "yt-dlp")
+}
