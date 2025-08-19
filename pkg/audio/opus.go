@@ -135,12 +135,7 @@ func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 		return nil, fmt.Errorf("invalid frame size for Discord: expected 960 samples per channel, got %d", op.config.FrameSize)
 	}
 
-	// Add debug logging for encoding operations (only log occasionally to avoid spam)
-	op.logger.Debug("Encoding PCM frame to Opus", map[string]interface{}{
-		"pcm_samples":  len(pcmData),
-		"frame_size":   op.config.FrameSize,
-		"bitrate":      op.config.Bitrate,
-	})
+	// Skip debug logging for individual frames to improve performance
 
 	// Encode the PCM data to Opus with proper error handling
 	// The maxDataBytes parameter (4000) provides enough space for worst-case Opus frame
@@ -175,11 +170,7 @@ func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 		return nil, fmt.Errorf("opus frame too large: %d bytes (max 4000)", len(opusData))
 	}
 
-	// Log successful encoding (debug level to avoid spam)
-	op.logger.Debug("Successfully encoded PCM to Opus", map[string]interface{}{
-		"pcm_samples": len(pcmData),
-		"opus_bytes":  len(opusData),
-	})
+	// Skip individual frame logging to improve performance
 
 	return opusData, nil
 }

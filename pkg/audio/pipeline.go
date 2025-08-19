@@ -544,13 +544,13 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 					// Successfully sent frame
 					framesProcessed++
 					
-					// Log progress periodically (every 100 frames)
-					if framesProcessed%100 == 0 {
+					// Log progress much less frequently (every 500 frames = ~10 seconds)
+					if framesProcessed%500 == 0 {
 						progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
 						progressFields["frames_processed"] = framesProcessed
 						progressFields["bytes_processed"] = bytesProcessed
 						progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
-						c.logger.Debug("Streaming progress", progressFields)
+						c.logger.Info("Streaming progress", progressFields)
 					}
 					
 				case <-c.stopChan:

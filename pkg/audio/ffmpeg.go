@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ type FFmpegProcessor struct {
 	errorPipe      io.ReadCloser
 	isRunning      bool
 	currentURL     string
+	tempFile       string        // Path to temporary audio file
 	mu             sync.RWMutex
 	logger         AudioLogger
 	pipelineLogger AudioLogger  // Pipeline-specific logger with context
@@ -57,22 +59,22 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 
 	fp.currentURL = url
 
-	// First, get the direct stream URL using yt-dlp
-	streamURL, err := fp.getStreamURL(url)
+	// Download the audio file first (this avoids HLS streaming issues)
+	tempFile, err := fp.downloadAudioFile(url)
 	if err != nil {
-		urlLogger.Error("Failed to get stream URL from yt-dlp", err, CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
-		return nil, fmt.Errorf("failed to get stream URL: %w", err)
+		urlLogger.Error("Failed to download audio file", err, CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+		return nil, fmt.Errorf("failed to download audio file: %w", err)
 	}
 
-	urlLogger.Debug("Got stream URL from yt-dlp", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+	urlLogger.Info("Successfully downloaded audio file", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
-	// Build the FFmpeg command arguments with the direct stream URL
-	args := fp.buildFFmpegArgsWithStreamURL(streamURL)
+	// Build the FFmpeg command arguments with the local file
+	args := fp.buildFFmpegArgsWithLocalFile(tempFile)
 
 	// Log the FFmpeg command for debugging
 	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
 	contextFields["ffmpeg_command"] = fp.config.BinaryPath + " " + strings.Join(args, " ")
-	contextFields["stream_url_length"] = len(streamURL)
+	contextFields["temp_file"] = tempFile
 	urlLogger.Info("Starting FFmpeg process", contextFields)
 
 	// Create the command
@@ -341,6 +343,64 @@ func (fp *FFmpegProcessor) buildFFmpegArgsWithStreamURL(streamURL string) []stri
 	return args
 }
 
+// downloadAudioFile downloads the audio using yt-dlp to a temporary file
+func (fp *FFmpegProcessor) downloadAudioFile(url string) (string, error) {
+	// Create a temporary file for the audio
+	tempFile := fmt.Sprintf("/tmp/audio_%d.m4a", time.Now().UnixNano())
+	
+	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+	contextFields["temp_file"] = tempFile
+	fp.pipelineLogger.Debug("Starting audio download", contextFields)
+	
+	// Use yt-dlp to download the audio file
+	cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-o", tempFile, url)
+	output, err := cmd.CombinedOutput()
+	
+	if err != nil {
+		contextFields["yt_dlp_output"] = string(output)
+		fp.pipelineLogger.Error("yt-dlp download failed", err, contextFields)
+		return "", fmt.Errorf("yt-dlp download failed: %w", err)
+	}
+	
+	// Verify the file was created and has content
+	info, statErr := os.Stat(tempFile)
+	if statErr != nil || info.Size() == 0 {
+		fp.pipelineLogger.Error("Downloaded file is missing or empty", statErr, contextFields)
+		return "", fmt.Errorf("downloaded file is missing or empty")
+	}
+	
+	contextFields["file_size"] = fmt.Sprintf("%.2f MB", float64(info.Size())/1024/1024)
+	fp.pipelineLogger.Info("Audio download completed", contextFields)
+	
+	// Store the temp file path for cleanup later
+	fp.tempFile = tempFile
+	
+	return tempFile, nil
+}
+
+// buildFFmpegArgsWithLocalFile constructs FFmpeg arguments for a local file
+func (fp *FFmpegProcessor) buildFFmpegArgsWithLocalFile(filePath string) []string {
+	args := []string{
+		// Input options for faster processing
+		"-re", // Read input at native frame rate (important for real-time streaming)
+		"-i", filePath,
+		// Output format options
+		"-f", fp.config.AudioFormat,
+		"-ar", fmt.Sprintf("%d", fp.config.SampleRate),
+		"-ac", fmt.Sprintf("%d", fp.config.Channels),
+		// Performance optimizations
+		"-threads", "0", // Use all available CPU threads
+		"-preset", "ultrafast", // Fastest encoding preset
+		"-avoid_negative_ts", "make_zero",
+		"-fflags", "+genpts",
+	}
+
+	// Add output to stdout
+	args = append(args, "pipe:1")
+
+	return args
+}
+
 // monitorStderr monitors the stderr output from FFmpeg for errors and warnings
 func (fp *FFmpegProcessor) monitorStderr() {
 	if fp.errorPipe == nil {
@@ -569,6 +629,16 @@ func (fp *FFmpegProcessor) cleanupResources() {
 	if fp.errorPipe != nil {
 		fp.errorPipe.Close()
 		fp.errorPipe = nil
+	}
+
+	// Clean up temporary file
+	if fp.tempFile != "" {
+		if err := os.Remove(fp.tempFile); err != nil {
+			fp.pipelineLogger.Warn("Failed to remove temporary file", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
+		} else {
+			fp.pipelineLogger.Debug("Cleaned up temporary file", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
+		}
+		fp.tempFile = ""
 	}
 
 	// Clear process reference
