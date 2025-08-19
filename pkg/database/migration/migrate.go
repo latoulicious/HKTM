@@ -30,6 +30,12 @@ func RunMigration(db *gorm.DB) error {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
 
+	// Run specific migrations for centralized logging
+	log.Println("Running centralized logging migrations...")
+	if err := AddCentralizedLoggingColumns(db); err != nil {
+		log.Fatalf("Failed to run centralized logging migration: %v", err)
+	}
+
 	log.Println("Migrations completed successfully!")
 	return nil
 }

@@ -30,10 +30,13 @@ type AudioMetric struct {
 type AudioLog struct {
 	ID        uuid.UUID              `gorm:"primaryKey" json:"id"`
 	GuildID   string                 `gorm:"index;not null" json:"guild_id"`
-	Level     string                 `gorm:"index;not null" json:"level"` // INFO, ERROR, WARN, DEBUG
+	Component string                 `gorm:"index;not null;default:'audio'" json:"component"` // "audio", "commands", "database", etc.
+	Level     string                 `gorm:"index;not null" json:"level"`                     // INFO, ERROR, WARN, DEBUG
 	Message   string                 `gorm:"type:text;not null" json:"message"`
 	Error     string                 `gorm:"type:text" json:"error"`
 	Fields    map[string]interface{} `gorm:"type:jsonb" json:"fields"`
+	UserID    string                 `gorm:"index" json:"user_id"`    // Optional user context
+	ChannelID string                 `gorm:"index" json:"channel_id"` // Optional channel context
 	Timestamp time.Time              `gorm:"index;not null" json:"timestamp"`
 }
 
