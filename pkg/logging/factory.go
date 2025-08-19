@@ -49,6 +49,11 @@ func GetGlobalLoggerFactory() LoggerFactory {
 	return globalLoggerFactory
 }
 
+// SetGlobalLoggerFactory sets the global LoggerFactory instance
+func SetGlobalLoggerFactory(factory LoggerFactory) {
+	globalLoggerFactory = factory
+}
+
 // DatabaseLoggerFactory implements LoggerFactory with database persistence
 type DatabaseLoggerFactory struct {
 	repository LogRepository

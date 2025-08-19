@@ -535,3 +535,45 @@ func InitializeQueueCommands(db *gorm.DB) {
 	queueDB = db
 	log.Println("Queue commands initialized with database connection")
 }
+
+// InitializeCommandsWithDB initializes the commands package with database connection for audio pipeline support
+func InitializeCommandsWithDB(db *gorm.DB) {
+	queueDB = db
+	
+	// Initialize centralized systems
+	embedBuilder = embed.GetGlobalAudioEmbedBuilder()
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger = loggerFactory.CreateLogger("commands")
+	
+	logger.Info("Commands package initialized with database connection", map[string]interface{}{
+		"database_connected": true,
+		"audio_pipeline_support": true,
+	})
+}
+
+// ShutdownAllAudioPipelines gracefully shuts down all active audio pipelines
+func ShutdownAllAudioPipelines() {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	shutdownLogger := loggerFactory.CreateLogger("shutdown")
+	
+	shutdownCount := 0
+	for guildID, queue := range queues {
+		if queue != nil && queue.HasActivePipeline() {
+			shutdownLogger.Info("Shutting down audio pipeline", map[string]interface{}{
+				"guild_id": guildID,
+			})
+			
+			// Stop current playbook
+			queue.StopAndCleanup()
+			shutdownCount++
+		}
+	}
+	
+	shutdownLogger.Info("Audio pipeline shutdown complete", map[string]interface{}{
+		"pipelines_shutdown": shutdownCount,
+		"total_queues": len(queues),
+	})
+}

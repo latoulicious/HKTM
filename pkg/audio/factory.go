@@ -82,7 +82,7 @@ func createRepository(db *gorm.DB) AudioRepository {
 // createLoggerFactory creates a centralized logging factory with database persistence
 func createLoggerFactory(repo AudioRepository) logging.LoggerFactory {
 	// Create a repository adapter for the logging system
-	logRepo := &LogRepositoryAdapter{audioRepo: repo}
+	logRepo := &LogRepositoryAdapter{AudioRepo: repo}
 	return logging.NewDatabaseLoggerFactory(logRepo)
 }
 
@@ -135,7 +135,7 @@ func createPipelineController(
 
 // LogRepositoryAdapter adapts AudioRepository to logging.LogRepository interface
 type LogRepositoryAdapter struct {
-	audioRepo AudioRepository
+	AudioRepo AudioRepository
 }
 
 // SaveLog implements logging.LogRepository interface
@@ -166,7 +166,7 @@ func (l *LogRepositoryAdapter) SaveLog(entry logging.LogEntry) error {
 		audioLog.Fields["component"] = entry.Component
 	}
 
-	return l.audioRepo.SaveLog(audioLog)
+	return l.AudioRepo.SaveLog(audioLog)
 }
 
 // AudioLoggerAdapter adapts logging.Logger to AudioLogger interface
