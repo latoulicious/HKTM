@@ -27,6 +27,7 @@ type StreamProcessor interface {
 	StartStream(url string) (io.ReadCloser, error)
 	Stop() error
 	IsRunning() bool
+	IsProcessAlive() bool
 	Restart(url string) error
 	WaitForExit(timeout time.Duration) error
 	GetProcessInfo() map[string]interface{}
@@ -37,6 +38,7 @@ type AudioEncoder interface {
 	Initialize() error
 	Encode(pcmData []int16) ([]byte, error)
 	Close() error
+	IsInitialized() bool
 	EncodeFrame(pcmFrame []int16) ([]byte, error)
 	GetFrameSize() int
 	GetFrameDuration() time.Duration

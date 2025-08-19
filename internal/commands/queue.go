@@ -222,24 +222,32 @@ func addToQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 	// Get or create queue for this guild
 	queue := getOrCreateQueue(guildID)
 
-	// Validate and get stream URL with metadata
-	streamURL, title, duration, err := common.GetYouTubeAudioStreamWithMetadata(url)
-	if err != nil {
-		sendEmbedMessage(s, m.ChannelID, "❌ Error", "Failed to get audio stream. Please check the URL.", 0xff0000)
-		return
-	}
-
 	// Check if it's a YouTube URL and extract video ID
 	var videoID string
 	var originalURL string
+	var title string
+	var duration time.Duration
+	
 	if common.IsYouTubeURL(url) {
+		// Get metadata only (no stream URL extraction to prevent expiration)
+		metadataTitle, metadataDuration, err := common.GetYouTubeMetadata(url)
+		if err != nil {
+			sendEmbedMessage(s, m.ChannelID, "❌ Error", "Failed to get video metadata. Please check the URL.", 0xff0000)
+			return
+		}
+		
 		videoID = common.ExtractYouTubeVideoID(url)
 		originalURL = url
-		// Use the new method for YouTube videos
-		queue.AddWithYouTubeData(streamURL, originalURL, videoID, title, m.Author.Username, duration)
+		title = metadataTitle
+		duration = metadataDuration
+		
+		// Pass original YouTube URL - audio pipeline will extract stream URL just-in-time
+		queue.AddWithYouTubeData("", originalURL, videoID, title, m.Author.Username, duration)
 	} else {
-		// Use the original method for non-YouTube URLs
-		queue.Add(streamURL, title, m.Author.Username)
+		// For non-YouTube URLs, we still need to validate them
+		// But we don't pre-extract stream URLs
+		queue.Add(url, "Direct URL", m.Author.Username)
+		title = "Direct URL"
 	}
 
 	// Send confirmation with embed
@@ -424,18 +432,15 @@ func startNextInQueue(s *discordgo.Session, m *discordgo.MessageCreate, queue *c
 	sendEmbedMessage(s, m.ChannelID, "🎶 Now Playing", description, 0x00ff00)
 
 	// Use the new pipeline system with enhanced error handling
-	// The queue will handle pipeline creation and URL refresh automatically
+	// Always pass the original YouTube URL to prevent URL expiration issues
+	// The audio pipeline will extract fresh URLs just-in-time
 	var playbackURL string
 	if item.OriginalURL != "" {
-		// For YouTube URLs, get a fresh URL to avoid expiration
-		freshURL, urlErr := queue.GetFreshStreamURLForCurrent()
-		if urlErr != nil {
-			log.Printf("Failed to get fresh URL, using original: %v", urlErr)
-			playbackURL = item.URL
-		} else {
-			playbackURL = freshURL
-		}
+		// Use the original YouTube URL - audio pipeline will extract fresh stream URL
+		playbackURL = item.OriginalURL
+		log.Printf("Using original YouTube URL for just-in-time processing: %s", item.Title)
 	} else {
+		// For direct URLs, use as-is
 		playbackURL = item.URL
 	}
 

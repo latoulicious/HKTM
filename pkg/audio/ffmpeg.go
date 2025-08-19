@@ -69,7 +69,11 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	// Build the FFmpeg command arguments with the direct stream URL
 	args := fp.buildFFmpegArgsWithStreamURL(streamURL)
 
-	urlLogger.Debug("Starting FFmpeg process", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+	// Log the FFmpeg command for debugging
+	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+	contextFields["ffmpeg_command"] = fp.config.BinaryPath + " " + strings.Join(args, " ")
+	contextFields["stream_url_length"] = len(streamURL)
+	urlLogger.Info("Starting FFmpeg process", contextFields)
 
 	// Create the command
 	fp.cmd = exec.Command(fp.config.BinaryPath, args...)
@@ -111,6 +115,10 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	go fp.monitorProcess()
 
 	urlLogger.Info("FFmpeg stream started successfully", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+
+	// Give FFmpeg a moment to initialize and start processing the stream
+	// This helps prevent immediate "file already closed" errors
+	time.Sleep(100 * time.Millisecond)
 
 	return stdout, nil
 }
@@ -212,32 +220,120 @@ func (fp *FFmpegProcessor) Restart(url string) error {
 func (fp *FFmpegProcessor) getStreamURL(url string) (string, error) {
 	fp.pipelineLogger.Debug("Getting stream URL with yt-dlp", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 
-	// Run yt-dlp to get the direct stream URL
-	cmd := exec.Command("yt-dlp", "-f", "bestaudio", "--get-url", url)
-	output, err := cmd.Output()
+	// Check if the URL is already a direct stream URL (Google Video manifest)
+	if strings.Contains(url, "googlevideo.com") || strings.Contains(url, "manifest/hls_playlist") {
+		contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+		contextFields["url_type"] = "direct_stream"
+		contextFields["skip_yt_dlp"] = true
+		fp.pipelineLogger.Info("URL is already a direct stream URL, skipping yt-dlp", contextFields)
+		return url, nil
+	}
+
+	// Try multiple strategies to get a stable stream URL
+	strategies := [][]string{
+		// Strategy 1: Best audio with specific format preference (avoid HLS when possible)
+		{"-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio", "--get-url"},
+		// Strategy 2: Force non-HLS formats
+		{"-f", "bestaudio[protocol!=m3u8]/bestaudio", "--get-url"},
+		// Strategy 3: Fallback to any audio
+		{"-f", "bestaudio", "--get-url"},
+	}
+
+	var output []byte
+	var err error
+	
+	for i, strategy := range strategies {
+		fp.pipelineLogger.Debug(fmt.Sprintf("Trying yt-dlp strategy %d/%d", i+1, len(strategies)), CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+		
+		cmd := exec.Command("yt-dlp", strategy...)
+		cmd.Args = append(cmd.Args, url)
+		output, err = cmd.CombinedOutput()
+		
+		if err == nil {
+			fp.pipelineLogger.Info(fmt.Sprintf("Successfully got URL using strategy %d", i+1), CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
+			break
+		}
+		
+		// Log failed attempt
+		contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+		contextFields["strategy"] = i + 1
+		contextFields["yt_dlp_output"] = string(output)
+		contextFields["yt_dlp_command"] = "yt-dlp " + strings.Join(strategy, " ")
+		fp.pipelineLogger.Warn(fmt.Sprintf("yt-dlp strategy %d failed", i+1), contextFields)
+	}
+	
 	if err != nil {
+		contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+		contextFields["final_yt_dlp_output"] = string(output)
+		fp.pipelineLogger.Error("All yt-dlp strategies failed", err, contextFields)
 		return "", fmt.Errorf("yt-dlp failed to get stream URL: %w", err)
 	}
 
-	streamURL := strings.TrimSpace(string(output))
-	if streamURL == "" {
-		return "", fmt.Errorf("yt-dlp returned empty stream URL")
+	rawOutput := strings.TrimSpace(string(output))
+	if rawOutput == "" {
+		return "", fmt.Errorf("yt-dlp returned empty output")
 	}
 
+	// Parse the output to extract only the URL (yt-dlp may include warnings)
+	lines := strings.Split(rawOutput, "\n")
+	var streamURL string
+	
+	// Find the first line that looks like a URL (starts with http)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http") {
+			streamURL = line
+			break
+		}
+	}
+	
+	if streamURL == "" {
+		// Log the raw output for debugging
+		contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+		contextFields["raw_yt_dlp_output"] = rawOutput
+		fp.pipelineLogger.Error("No valid URL found in yt-dlp output", fmt.Errorf("no URL found"), contextFields)
+		return "", fmt.Errorf("yt-dlp did not return a valid URL")
+	}
+
+	// Log successful URL extraction with truncated URL for security
+	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+	if len(streamURL) > 100 {
+		contextFields["extracted_url"] = streamURL[:100] + "..."
+	} else {
+		contextFields["extracted_url"] = streamURL
+	}
+	contextFields["warnings_filtered"] = len(lines) > 1
+	fp.pipelineLogger.Info("Successfully extracted stream URL from yt-dlp", contextFields)
+
+	fp.pipelineLogger.Debug("Successfully got stream URL from yt-dlp", CreateContextFieldsWithComponent("", "", url, "ffmpeg"))
 	return streamURL, nil
 }
 
 // buildFFmpegArgsWithStreamURL constructs the FFmpeg command arguments with a direct stream URL
 func (fp *FFmpegProcessor) buildFFmpegArgsWithStreamURL(streamURL string) []string {
 	args := []string{
+		// Input options for better stream handling
+		"-reconnect", "1",
+		"-reconnect_streamed", "1", 
+		"-reconnect_delay_max", "5",
 		"-i", streamURL,
+		// Output format options
 		"-f", fp.config.AudioFormat,
 		"-ar", fmt.Sprintf("%d", fp.config.SampleRate),
 		"-ac", fmt.Sprintf("%d", fp.config.Channels),
+		// Additional stability options
+		"-avoid_negative_ts", "make_zero",
+		"-fflags", "+genpts",
 	}
 
-	// Add custom arguments from configuration
-	args = append(args, fp.config.CustomArgs...)
+	// Add custom arguments from configuration (but avoid duplicates)
+	for _, customArg := range fp.config.CustomArgs {
+		// Skip if we already added these
+		if customArg != "-reconnect" && customArg != "1" && 
+		   customArg != "-reconnect_delay_max" && customArg != "5" {
+			args = append(args, customArg)
+		}
+	}
 
 	// Add output to stdout
 	args = append(args, "pipe:1")
@@ -270,10 +366,13 @@ func (fp *FFmpegProcessor) monitorStderr() {
 		fp.stderrBuffer = append(fp.stderrBuffer, line)
 		fp.mu.Unlock()
 
-		// Log FFmpeg output for debugging
+		// Log FFmpeg output for debugging (both to database and console for immediate visibility)
 		contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
 		contextFields["output"] = line
 		fp.pipelineLogger.Debug("FFmpeg stderr", contextFields)
+		
+		// Also log to console immediately to avoid database delays
+		fmt.Printf("[FFmpeg] %s\n", line)
 
 		// Check for specific error patterns
 		if fp.isErrorLine(line) {
@@ -287,6 +386,13 @@ func (fp *FFmpegProcessor) monitorStderr() {
 			criticalFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
 			criticalFields["error"] = line
 			fp.pipelineLogger.Error("FFmpeg critical error detected", fmt.Errorf("critical error: %s", line), criticalFields)
+		}
+
+		// Check for specific HLS/stream related errors
+		if fp.isStreamError(line) {
+			streamFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
+			streamFields["stream_error"] = line
+			fp.pipelineLogger.Error("FFmpeg stream error detected", fmt.Errorf("stream error: %s", line), streamFields)
 		}
 	}
 
@@ -331,8 +437,13 @@ func (fp *FFmpegProcessor) monitorProcess() {
 			contextFields["exit_code"] = exitCode
 			contextFields["recent_stderr"] = fp.getRecentStderr()
 			fp.pipelineLogger.Error("FFmpeg process exited unexpectedly", err, contextFields)
+			
+			// Also log to console immediately
+			fmt.Printf("[FFmpeg] Process exited with code %d, error: %v\n", exitCode, err)
+			fmt.Printf("[FFmpeg] Recent stderr: %v\n", fp.getRecentStderr())
 		} else {
 			fp.pipelineLogger.Info("FFmpeg process completed normally", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
+			fmt.Printf("[FFmpeg] Process completed normally\n")
 		}
 
 		// Clean up resources
@@ -390,6 +501,42 @@ func (fp *FFmpegProcessor) isCriticalError(line string) bool {
 	}
 
 	for _, pattern := range criticalPatterns {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStreamError checks if a stderr line indicates a stream-related error
+func (fp *FFmpegProcessor) isStreamError(line string) bool {
+	streamErrorPatterns := []string{
+		"Connection refused",
+		"connection refused",
+		"HTTP error",
+		"http error",
+		"Server returned",
+		"server returned",
+		"403 Forbidden",
+		"404 Not Found",
+		"Immediate exit requested",
+		"immediate exit requested",
+		"No such file or directory",
+		"Protocol not found",
+		"protocol not found",
+		"Invalid data found",
+		"invalid data found",
+		"End of file",
+		"end of file",
+		"I/O error",
+		"i/o error",
+		"Network is unreachable",
+		"network is unreachable",
+		"Operation timed out",
+		"operation timed out",
+	}
+
+	for _, pattern := range streamErrorPatterns {
 		if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
 			return true
 		}
@@ -467,7 +614,29 @@ func (fp *FFmpegProcessor) GetProcessInfo() map[string]interface{} {
 
 	if fp.cmd != nil && fp.cmd.Process != nil {
 		info["pid"] = fp.cmd.Process.Pid
+		// Check if process is still alive
+		if fp.cmd.ProcessState != nil {
+			info["process_exited"] = fp.cmd.ProcessState.Exited()
+			info["exit_code"] = fp.cmd.ProcessState.ExitCode()
+		}
 	}
 
 	return info
+}
+
+// IsProcessAlive checks if the FFmpeg process is still running
+func (fp *FFmpegProcessor) IsProcessAlive() bool {
+	fp.mu.RLock()
+	defer fp.mu.RUnlock()
+	
+	if fp.cmd == nil || fp.cmd.Process == nil {
+		return false
+	}
+	
+	// If ProcessState is available and shows exited, process is dead
+	if fp.cmd.ProcessState != nil && fp.cmd.ProcessState.Exited() {
+		return false
+	}
+	
+	return fp.isRunning
 }

@@ -148,10 +148,10 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 			return
 		}
 
-		// Now get the audio stream from the found video URL
-		streamURL, streamTitle, streamDuration, streamErr := common.GetYouTubeAudioStreamWithMetadata(foundVideoURL)
-		if streamErr != nil {
-			playCommandLogger.Error("Error fetching stream URL from search result", streamErr, map[string]interface{}{
+		// Get metadata only (no stream URL extraction to prevent expiration)
+		metadataTitle, metadataDuration, metadataErr := common.GetYouTubeMetadata(foundVideoURL)
+		if metadataErr != nil {
+			playCommandLogger.Error("Error fetching metadata from search result", metadataErr, map[string]interface{}{
 				"found_video_url": foundVideoURL,
 				"search_query":    searchQuery,
 				"user_id":         m.Author.ID,
@@ -159,14 +159,15 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 			})
 			
 			// Use centralized embed system for error messages
-			embed := playCommandEmbedBuilder.Error("❌ Error", "Failed to get audio stream from search result.")
+			embed := playCommandEmbedBuilder.Error("❌ Error", "Failed to get video metadata from search result.")
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 			return
 		}
 
-		url = streamURL
-		title = streamTitle
-		duration = streamDuration
+		// Use the original YouTube URL, not a pre-extracted stream URL
+		url = foundVideoURL
+		title = metadataTitle
+		duration = metadataDuration
 		videoURL = foundVideoURL // Store the found video URL
 	}
 
@@ -181,8 +182,8 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 	if common.IsYouTubeURL(videoURL) {
 		videoID = common.ExtractYouTubeVideoID(videoURL)
 		originalURL = videoURL
-		// Use the new method for YouTube videos
-		queue.AddWithYouTubeData(url, originalURL, videoID, title, m.Author.Username, duration)
+		// Pass original YouTube URL - audio pipeline will extract stream URL just-in-time
+		queue.AddWithYouTubeData("", originalURL, videoID, title, m.Author.Username, duration)
 		
 		playCommandLogger.Info("Added YouTube video to queue", map[string]interface{}{
 			"title":        title,

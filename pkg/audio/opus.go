@@ -34,8 +34,8 @@ func (op *OpusProcessor) Initialize() error {
 	defer op.mu.Unlock()
 
 	if op.encoder != nil {
-		op.logger.Warn("Opus encoder already initialized", nil)
-		return fmt.Errorf("opus encoder already initialized")
+		op.logger.Debug("Opus encoder already initialized, skipping", nil)
+		return nil // Already initialized - this is not an error
 	}
 
 	// Discord requires 48kHz sample rate, stereo (2 channels)

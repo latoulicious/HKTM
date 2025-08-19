@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/latoulicious/HKTM/pkg/database/models"
 	"github.com/latoulicious/HKTM/pkg/logging"
 	"gorm.io/gorm"
@@ -142,6 +143,7 @@ type LogRepositoryAdapter struct {
 func (l *LogRepositoryAdapter) SaveLog(entry logging.LogEntry) error {
 	// Convert logging.LogEntry to models.AudioLog
 	audioLog := &models.AudioLog{
+		ID:        uuid.New(), // Generate unique UUID for each log entry
 		GuildID:   entry.GuildID,
 		Level:     entry.Level,
 		Message:   entry.Message,

@@ -19,6 +19,12 @@ ffmpeg:
     - "-reconnect_delay_max"
     - "5"
 
+ytdlp:
+  binary_path: "yt-dlp"
+  custom_args:
+    - "--no-playlist"
+    - "--extract-flat"
+
 opus:
   bitrate: 128000
   frame_size: 960

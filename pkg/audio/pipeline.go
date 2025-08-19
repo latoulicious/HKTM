@@ -363,11 +363,16 @@ func (c *AudioPipelineController) executePlayback(url string, voiceConn *discord
 	// Record startup time measurement
 	startTime := time.Now()
 
-	// Step 1: Initialize audio encoder first (required for streaming)
-	c.logger.Debug("Initializing audio encoder", contextFields)
-	if err := c.audioEncoder.Initialize(); err != nil {
-		c.logger.Error("Audio encoder initialization failed", err, contextFields)
-		return c.handlePlaybackError(err, "encoder_init")
+	// Step 1: Check if audio encoder needs initialization
+	c.logger.Debug("Checking audio encoder status", contextFields)
+	if !c.audioEncoder.IsInitialized() {
+		c.logger.Debug("Initializing audio encoder", contextFields)
+		if err := c.audioEncoder.Initialize(); err != nil {
+			c.logger.Error("Audio encoder initialization failed", err, contextFields)
+			return c.handlePlaybackError(err, "encoder_init")
+		}
+	} else {
+		c.logger.Debug("Audio encoder already initialized, skipping", contextFields)
 	}
 
 	// Step 2: Prepare encoder for streaming
@@ -431,6 +436,10 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	contextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream")
 	c.logger.Debug("Starting audio streaming loop", contextFields)
 
+	// Give FFmpeg a moment to initialize and start producing output
+	// This prevents immediate "file already closed" errors
+	time.Sleep(200 * time.Millisecond)
+
 	// Get optimal frame size from encoder
 	frameSize := c.audioEncoder.GetFrameSize()
 	frameDuration := c.audioEncoder.GetFrameDuration()
@@ -474,12 +483,25 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 					return
 				}
 				
-				// Stream read error - attempt recovery
+				// Stream read error - provide extra context for first read failure
 				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_read")
 				errorContextFields["frames_processed"] = framesProcessed
 				errorContextFields["bytes_processed"] = bytesProcessed
+				errorContextFields["is_first_read"] = framesProcessed == 0 && bytesProcessed == 0
+				errorContextFields["time_since_start"] = FormatDuration(time.Since(streamStartTime))
 				
-				c.logger.Error("Stream read error", err, errorContextFields)
+				// Check if FFmpeg process is still alive
+				if c.streamProcessor != nil {
+					errorContextFields["ffmpeg_running"] = c.streamProcessor.IsRunning()
+					errorContextFields["ffmpeg_alive"] = c.streamProcessor.IsProcessAlive()
+					errorContextFields["ffmpeg_info"] = c.streamProcessor.GetProcessInfo()
+				}
+				
+				if framesProcessed == 0 && bytesProcessed == 0 {
+					c.logger.Error("FFmpeg process appears to have exited immediately - check FFmpeg stderr for details", err, errorContextFields)
+				} else {
+					c.logger.Error("Stream read error", err, errorContextFields)
+				}
 				c.handlePlaybackError(err, "stream_read")
 				return
 			}
@@ -669,8 +691,8 @@ func (c *AudioPipelineController) cleanupForRetry() {
 		}
 	}
 
-	// Close and reinitialize audio encoder
-	if c.audioEncoder != nil {
+	// Close audio encoder (but don't reinitialize - let executePlayback handle that)
+	if c.audioEncoder != nil && c.audioEncoder.IsInitialized() {
 		if err := c.audioEncoder.Close(); err != nil {
 			c.logger.Warn("Error closing audio encoder during cleanup", CreateContextFields("", "", c.currentURL))
 		}
