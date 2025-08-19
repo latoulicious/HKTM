@@ -25,3 +25,8 @@ multiplier = 2.0
 level = "info"
 format = "json"
 save_to_db = true
+components = ["audio", "commands", "database", "system"]  # Centralized logging components
+
+[metrics]
+enabled = true
+retention_days = 30  # How long to keep metrics in database
