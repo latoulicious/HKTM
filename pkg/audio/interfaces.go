@@ -15,7 +15,7 @@ type AudioPipeline interface {
 	Stop() error
 	IsPlaying() bool
 	GetStatus() PipelineStatus
-	
+
 	// Lifecycle management
 	Initialize() error
 	Shutdown() error
@@ -31,6 +31,10 @@ type StreamProcessor interface {
 	Restart(url string) error
 	WaitForExit(timeout time.Duration) error
 	GetProcessInfo() map[string]interface{}
+
+	// URL refresh detection methods (Requirement 8.1, 8.2)
+	DetectStreamFailure(err error) bool
+	HandleStreamFailureWithRefresh(originalURL string) error
 }
 
 // AudioEncoder handles Opus encoding for Discord compatibility
@@ -75,7 +79,7 @@ type AudioLogger interface {
 	Error(msg string, err error, fields map[string]interface{})
 	Warn(msg string, fields map[string]interface{})
 	Debug(msg string, fields map[string]interface{})
-	
+
 	// Pipeline context methods for centralized logging integration
 	WithPipeline(pipeline string) AudioLogger
 	WithContext(ctx map[string]interface{}) AudioLogger

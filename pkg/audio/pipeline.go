@@ -51,18 +51,18 @@ type AudioPipelineController struct {
 	config          ConfigProvider
 
 	// State management only
-	state         PipelineState
-	currentURL    string
-	voiceConn     *discordgo.VoiceConnection
-	startTime     time.Time
-	errorCount    int
-	lastError     error
-	stopChan      chan struct{}
-	mu            sync.RWMutex
-	ctx           context.Context
-	cancelFunc    context.CancelFunc
-	initialized   bool
-	shutdownOnce  sync.Once
+	state        PipelineState
+	currentURL   string
+	voiceConn    *discordgo.VoiceConnection
+	startTime    time.Time
+	errorCount   int
+	lastError    error
+	stopChan     chan struct{}
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancelFunc   context.CancelFunc
+	initialized  bool
+	shutdownOnce sync.Once
 }
 
 // NewAudioPipelineController creates a new AudioPipelineController with injected dependencies
@@ -393,7 +393,7 @@ func (c *AudioPipelineController) executePlayback(url string, voiceConn *discord
 	// Step 4: Record successful startup metrics
 	startupDuration := time.Since(startTime)
 	c.metrics.RecordStartupTime(startupDuration)
-	
+
 	contextFields["startup_duration"] = FormatDuration(startupDuration)
 	c.logger.Info("Pipeline components initialized successfully", contextFields)
 
@@ -443,11 +443,11 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	// Get optimal frame size from encoder
 	frameSize := c.audioEncoder.GetFrameSize()
 	frameDuration := c.audioEncoder.GetFrameDuration()
-	
+
 	// Prepare buffers for audio processing
 	pcmBuffer := make([]int16, frameSize)
 	byteBuffer := make([]byte, frameSize*2) // 2 bytes per int16 sample
-	
+
 	contextFields["frame_size"] = frameSize
 	contextFields["frame_duration"] = FormatDuration(frameDuration)
 	c.logger.Debug("Audio streaming buffers initialized", contextFields)
@@ -477,26 +477,26 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 					endContextFields["frames_processed"] = framesProcessed
 					endContextFields["bytes_processed"] = bytesProcessed
 					endContextFields["stream_duration"] = FormatDuration(streamDuration)
-					
+
 					c.logger.Info("Stream ended normally", endContextFields)
 					c.handleStreamEnd()
 					return
 				}
-				
+
 				// Stream read error - provide extra context for first read failure
 				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_read")
 				errorContextFields["frames_processed"] = framesProcessed
 				errorContextFields["bytes_processed"] = bytesProcessed
 				errorContextFields["is_first_read"] = framesProcessed == 0 && bytesProcessed == 0
 				errorContextFields["time_since_start"] = FormatDuration(time.Since(streamStartTime))
-				
+
 				// Check if FFmpeg process is still alive
 				if c.streamProcessor != nil {
 					errorContextFields["ffmpeg_running"] = c.streamProcessor.IsRunning()
 					errorContextFields["ffmpeg_alive"] = c.streamProcessor.IsProcessAlive()
 					errorContextFields["ffmpeg_info"] = c.streamProcessor.GetProcessInfo()
 				}
-				
+
 				if framesProcessed == 0 && bytesProcessed == 0 {
 					c.logger.Error("FFmpeg process appears to have exited immediately - check FFmpeg stderr for details", err, errorContextFields)
 				} else {
@@ -531,7 +531,7 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
 				errorContextFields["samples_count"] = samplesRead
 				errorContextFields["frame_number"] = framesProcessed
-				
+
 				c.logger.Error("Encoding error", err, errorContextFields)
 				c.handlePlaybackError(err, "encoding")
 				return
@@ -543,7 +543,7 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 				case c.voiceConn.OpusSend <- opusData:
 					// Successfully sent frame
 					framesProcessed++
-					
+
 					// Log progress much less frequently (every 500 frames = ~10 seconds)
 					if framesProcessed%500 == 0 {
 						progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
@@ -552,7 +552,7 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 						progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
 						c.logger.Info("Streaming progress", progressFields)
 					}
-					
+
 				case <-c.stopChan:
 					c.logger.Debug("Stop signal received while sending frame", contextFields)
 					return
@@ -606,6 +606,23 @@ func (c *AudioPipelineController) handlePlaybackError(err error, context string)
 
 	// Record error in metrics system
 	c.metrics.RecordError(context)
+
+	// Check if this might be a URL expiry issue and try refresh first (Requirement 8.2)
+	if context == "stream_read" || context == "stream_start" {
+		if c.streamProcessor.DetectStreamFailure(err) && errorCount <= 2 { // Try URL refresh for first 2 attempts
+			refreshContextFields := CreateContextFieldsWithComponent(guildID, "", url, "url_refresh_recovery")
+			refreshContextFields["error_count"] = errorCount
+			c.logger.Info("Attempting URL refresh recovery", refreshContextFields)
+
+			if refreshErr := c.streamProcessor.HandleStreamFailureWithRefresh(url); refreshErr == nil {
+				c.logger.Info("URL refresh recovery successful", refreshContextFields)
+				return nil // Recovery successful
+			} else {
+				refreshContextFields["refresh_error"] = refreshErr.Error()
+				c.logger.Warn("URL refresh recovery failed", refreshContextFields)
+			}
+		}
+	}
 
 	// Use error handler to determine retry strategy
 	shouldRetry, delay := c.errorHandler.HandleError(err, context)

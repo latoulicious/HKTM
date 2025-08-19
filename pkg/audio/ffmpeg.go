@@ -30,6 +30,14 @@ type FFmpegProcessor struct {
 	processExited  chan struct{} // Channel to signal when process has exited
 	stderrBuffer   []string      // Buffer to store recent stderr lines for debugging
 	maxStderrLines int           // Maximum number of stderr lines to keep
+
+	// URL refresh detection fields
+	originalURL   string      // Original YouTube URL for refresh
+	streamURL     string      // Current streaming URL from yt-dlp
+	urlExpiry     time.Time   // Expected URL expiration time
+	urlStartTime  time.Time   // When URL was first obtained
+	refreshTimer  *time.Timer // Timer for proactive URL refresh
+	refreshActive bool        // Whether URL refresh is currently active
 }
 
 // NewFFmpegProcessor creates a new FFmpegProcessor instance
@@ -63,10 +71,16 @@ func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
 	}
 
 	fp.currentURL = url
+	fp.originalURL = url // Store original URL for refresh
 	fp.retryCount = 0
 
+	// Get fresh streaming URL and track expiry (Requirement 8.1)
+	if err := fp.refreshStreamURL(url, urlLogger); err != nil {
+		return nil, fmt.Errorf("failed to get initial stream URL: %w", err)
+	}
+
 	// Start the streaming pipeline with retry logic
-	return fp.startStreamWithRetry(url, urlLogger)
+	return fp.startStreamWithRetry(fp.streamURL, urlLogger)
 }
 
 // startStreamWithRetry attempts to start the streaming pipeline with retry logic
@@ -82,7 +96,24 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 
 		if attempt > 0 {
 			urlLogger.Info("Retrying stream start", contextFields)
-			// Simple delay between retries: 2s, 5s, 10s
+
+			// Check if failure might be due to URL expiry and try refresh (Requirement 8.2, 6.1)
+			if fp.DetectStreamFailure(lastErr) && fp.originalURL != "" {
+				contextFields["trying_url_refresh"] = true
+				urlLogger.Info("Attempting URL refresh for retry", contextFields)
+
+				if refreshErr := fp.refreshStreamURL(fp.originalURL, urlLogger); refreshErr == nil {
+					// Use fresh URL for retry
+					url = fp.streamURL
+					contextFields["using_fresh_url"] = true
+					urlLogger.Info("Using fresh URL for retry", contextFields)
+				} else {
+					contextFields["refresh_error"] = refreshErr.Error()
+					urlLogger.Warn("URL refresh failed, using original URL", contextFields)
+				}
+			}
+
+			// Simple delay between retries: 2s, 5s, 10s (Requirement 6.1)
 			delay := time.Duration(2+attempt*3) * time.Second
 			time.Sleep(delay)
 		} else {
@@ -98,16 +129,18 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 
 		lastErr = err
 		contextFields["error"] = err.Error()
+		contextFields["is_url_expiry_error"] = fp.DetectStreamFailure(err)
 		urlLogger.Warn("Stream start attempt failed", contextFields)
 
 		// Clean up failed attempt
 		fp.stopInternal()
 	}
 
-	// All retries exhausted
+	// All retries exhausted (Requirement 6.2)
 	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
 	contextFields["total_attempts"] = fp.maxRetries + 1
 	contextFields["final_error"] = lastErr.Error()
+	contextFields["original_url"] = fp.originalURL
 	urlLogger.Error("All stream start attempts failed", lastErr, contextFields)
 
 	return nil, fmt.Errorf("failed to start stream after %d attempts: %w", fp.maxRetries+1, lastErr)
@@ -270,6 +303,12 @@ func (fp *FFmpegProcessor) stopInternal() error {
 
 	fp.pipelineLogger.Debug("Stopping yt-dlp | ffmpeg pipeline", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
 
+	// Stop URL refresh timer
+	if fp.refreshTimer != nil {
+		fp.refreshTimer.Stop()
+		fp.refreshTimer = nil
+	}
+
 	// Close pipes first to signal the processes to stop
 	if fp.outputPipe != nil {
 		fp.outputPipe.Close()
@@ -298,6 +337,11 @@ func (fp *FFmpegProcessor) stopInternal() error {
 	fp.cmd = nil
 	fp.ytdlpCmd = nil
 	fp.currentURL = ""
+	fp.originalURL = ""
+	fp.streamURL = ""
+	fp.urlExpiry = time.Time{}
+	fp.urlStartTime = time.Time{}
+	fp.refreshActive = false
 	fp.stderrBuffer = nil
 
 	fp.pipelineLogger.Info("yt-dlp | ffmpeg pipeline stopped", CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg"))
@@ -708,6 +752,12 @@ func (fp *FFmpegProcessor) getRecentStderr() []string {
 
 // cleanupResources cleans up all process-related resources
 func (fp *FFmpegProcessor) cleanupResources() {
+	// Stop URL refresh timer
+	if fp.refreshTimer != nil {
+		fp.refreshTimer.Stop()
+		fp.refreshTimer = nil
+	}
+
 	// Clean up pipes
 	if fp.outputPipe != nil {
 		fp.outputPipe.Close()
@@ -726,6 +776,11 @@ func (fp *FFmpegProcessor) cleanupResources() {
 	fp.cmd = nil
 	fp.ytdlpCmd = nil
 	fp.currentURL = ""
+	fp.originalURL = ""
+	fp.streamURL = ""
+	fp.urlExpiry = time.Time{}
+	fp.urlStartTime = time.Time{}
+	fp.refreshActive = false
 	fp.stderrBuffer = nil
 }
 
@@ -791,4 +846,186 @@ func (fp *FFmpegProcessor) IsProcessAlive() bool {
 	}
 
 	return fp.isRunning
+}
+
+// refreshStreamURL gets a fresh streaming URL from yt-dlp and tracks expiry (Requirement 8.1)
+func (fp *FFmpegProcessor) refreshStreamURL(originalURL string, logger AudioLogger) error {
+	contextFields := CreateContextFieldsWithComponent("", "", originalURL, "url_refresh")
+	logger.Info("Getting fresh streaming URL", contextFields)
+
+	// Use yt-dlp to extract stream URL with metadata
+	cmd := exec.Command(fp.ytdlpConfig.BinaryPath,
+		"--get-url",
+		"--quiet",
+		"--no-warnings",
+		"--format", "bestaudio",
+		originalURL)
+
+	output, err := cmd.Output()
+	if err != nil {
+		contextFields["error"] = err.Error()
+		logger.Error("yt-dlp URL extraction failed", err, contextFields)
+		return fmt.Errorf("yt-dlp extraction failed: %w", err)
+	}
+
+	streamURL := strings.TrimSpace(string(output))
+	if streamURL == "" {
+		logger.Error("yt-dlp returned empty URL", fmt.Errorf("empty URL"), contextFields)
+		return fmt.Errorf("yt-dlp returned empty URL")
+	}
+
+	// YouTube URLs typically expire after 5-6 minutes
+	// We'll be conservative and assume 5 minutes
+	fp.streamURL = streamURL
+	fp.urlStartTime = time.Now()
+	fp.urlExpiry = fp.urlStartTime.Add(5 * time.Minute)
+
+	contextFields["stream_url"] = streamURL
+	contextFields["expiry_time"] = fp.urlExpiry.Format(time.RFC3339)
+	contextFields["estimated_ttl"] = "5m"
+	logger.Info("Fresh streaming URL obtained", contextFields)
+
+	// Start proactive refresh timer (Requirement 8.2)
+	fp.startURLRefreshTimer(originalURL, logger)
+
+	return nil
+}
+
+// startURLRefreshTimer starts a timer to proactively refresh the URL before expiry (Requirement 8.2)
+func (fp *FFmpegProcessor) startURLRefreshTimer(originalURL string, logger AudioLogger) {
+	// Stop any existing refresh timer
+	if fp.refreshTimer != nil {
+		fp.refreshTimer.Stop()
+		fp.refreshTimer = nil
+	}
+
+	// Refresh 1 minute before expiry (or immediately if already close)
+	refreshTime := fp.urlExpiry.Add(-1 * time.Minute)
+	delay := time.Until(refreshTime)
+
+	contextFields := CreateContextFieldsWithComponent("", "", originalURL, "url_refresh_timer")
+	contextFields["current_expiry"] = fp.urlExpiry.Format(time.RFC3339)
+	contextFields["refresh_delay"] = delay.String()
+
+	if delay <= 0 {
+		// Already expired or very close, refresh immediately
+		logger.Info("URL close to expiry, refreshing immediately", contextFields)
+		go fp.handleURLRefresh(originalURL, logger)
+		return
+	}
+
+	logger.Info("Starting URL refresh timer", contextFields)
+	fp.refreshTimer = time.AfterFunc(delay, func() {
+		fp.handleURLRefresh(originalURL, logger)
+	})
+}
+
+// handleURLRefresh handles proactive URL refresh in background (Requirement 8.2)
+func (fp *FFmpegProcessor) handleURLRefresh(originalURL string, logger AudioLogger) {
+	fp.mu.Lock()
+	if fp.refreshActive {
+		fp.mu.Unlock()
+		return // Already refreshing
+	}
+	fp.refreshActive = true
+	fp.mu.Unlock()
+
+	defer func() {
+		fp.mu.Lock()
+		fp.refreshActive = false
+		fp.mu.Unlock()
+	}()
+
+	contextFields := CreateContextFieldsWithComponent("", "", originalURL, "url_refresh")
+	contextFields["current_expiry"] = fp.urlExpiry.Format(time.RFC3339)
+	logger.Info("Starting proactive URL refresh", contextFields)
+
+	// Try to get fresh URL with retry logic (Requirement 6.1, 6.2)
+	var refreshErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			// Short delay between retries (2s, 5s)
+			delay := time.Duration(2+attempt*3) * time.Second
+			contextFields["retry_attempt"] = attempt + 1
+			contextFields["retry_delay"] = delay.String()
+			logger.Info("Retrying URL refresh", contextFields)
+			time.Sleep(delay)
+		}
+
+		refreshErr = fp.refreshStreamURL(originalURL, logger)
+		if refreshErr == nil {
+			logger.Info("URL refresh successful", contextFields)
+			return
+		}
+
+		contextFields["error"] = refreshErr.Error()
+		logger.Warn("URL refresh attempt failed", contextFields)
+	}
+
+	// All refresh attempts failed
+	contextFields["final_error"] = refreshErr.Error()
+	logger.Error("URL refresh failed after all attempts", refreshErr, contextFields)
+}
+
+// DetectStreamFailure detects if current stream has failed due to URL expiry
+func (fp *FFmpegProcessor) DetectStreamFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errorStr := strings.ToLower(err.Error())
+
+	// Common patterns that indicate URL expiry or stream death
+	urlExpiryPatterns := []string{
+		"403 forbidden",
+		"404 not found",
+		"connection refused",
+		"server returned 4",
+		"http error 4",
+		"invalid data found",
+		"end of file",
+		"immediate exit requested",
+		"no such file or directory",
+	}
+
+	for _, pattern := range urlExpiryPatterns {
+		if strings.Contains(errorStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// HandleStreamFailureWithRefresh handles stream failure by attempting URL refresh (Requirement 8.2, 6.1)
+func (fp *FFmpegProcessor) HandleStreamFailureWithRefresh(originalURL string) error {
+	logger := fp.pipelineLogger
+	contextFields := CreateContextFieldsWithComponent("", "", originalURL, "stream_failure_recovery")
+	contextFields["current_expiry"] = fp.urlExpiry.Format(time.RFC3339)
+	contextFields["time_since_start"] = time.Since(fp.urlStartTime).String()
+
+	logger.Info("Attempting recovery with fresh URL", contextFields)
+
+	// Try to get fresh URL
+	if err := fp.refreshStreamURL(originalURL, logger); err != nil {
+		contextFields["refresh_error"] = err.Error()
+		logger.Error("Failed to get fresh URL for recovery", err, contextFields)
+		return fmt.Errorf("URL refresh failed during recovery: %w", err)
+	}
+
+	// Restart pipeline with fresh URL
+	logger.Info("Restarting pipeline with fresh URL", contextFields)
+	return fp.restartWithFreshURL(logger)
+}
+
+// restartWithFreshURL restarts the pipeline with the current fresh stream URL
+func (fp *FFmpegProcessor) restartWithFreshURL(logger AudioLogger) error {
+	// Stop current pipeline
+	if err := fp.stopInternal(); err != nil {
+		logger.Warn("Error stopping pipeline during refresh restart", CreateContextFieldsWithComponent("", "", fp.originalURL, "refresh_restart"))
+	}
+
+	// Start new pipeline with fresh URL
+	_, err := fp.startPipeline(fp.streamURL, logger)
+	return err
 }
