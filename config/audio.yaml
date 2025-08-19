@@ -8,22 +8,54 @@ pipeline:
     - "-reconnect_delay_max"
     - "5"
 
+# Streaming pipeline configuration
+streaming:
+  # Binary paths - make sure these are installed and accessible
+  ytdlp_path: "yt-dlp"              # or full path like "/usr/local/bin/yt-dlp"
+  ffmpeg_path: "ffmpeg"             # or full path like "/usr/bin/ffmpeg"
+  
+  # Audio quality settings
+  sample_rate: 48000
+  channels: 2
+  bitrate: 128000
+  
+  # Buffer and timing
+  buffer_size: 3840                 # 20ms of PCM audio
+  url_refresh_buffer: "1m"          # Refresh URLs 1 minute before expiry
+  url_retry_delay: "30s"            # Wait 30s before retrying failed URL refresh
+  
+  # Process timeouts
+  start_timeout: "30s"              # Max time to start processes
+  process_timeout: "5m"             # Max time for process to run
+
+# FFmpeg settings (for the pipeline)
 ffmpeg:
   binary_path: "ffmpeg"
-  audio_format: "s16le"
+  audio_format: "s16le"             # PCM 16-bit little endian
   sample_rate: 48000
   channels: 2
   custom_args:
-    - "-reconnect"
-    - "1"
-    - "-reconnect_delay_max"
-    - "5"
+    - "-hide_banner"                # Reduce output noise
+    - "-loglevel"
+    - "error"                       # Only show errors
+    - "-avoid_negative_ts"
+    - "make_zero"
 
+# yt-dlp specific settings
 ytdlp:
   binary_path: "yt-dlp"
+  format: "bestaudio"               # Get best audio quality
+  timeout: 30
+  extract_flat: false               # Get full metadata
+  quiet: true                       # Reduce output noise
+  no_warnings: true
   custom_args:
     - "--no-playlist"
-    - "--extract-flat"
+    - "--no-check-certificate"      # Skip SSL cert checks if needed
+    - "--socket-timeout"
+    - "30"                          # 30 second socket timeout
+    - "--retries"
+    - "3"                           # Retry failed downloads
 
 opus:
   bitrate: 128000
@@ -35,12 +67,16 @@ retry:
   max_delay: "30s"
   multiplier: 2.0
 
+# Logging configuration
 logger:
   level: "info"
   format: "json"
   save_to_db: true
-  components: ["audio", "commands", "database", "system"]  # Centralized logging components
+  components: ["audio", "uma_api", "uma_sync", "streaming"]
 
+# Performance monitoring
 metrics:
   enabled: true
-  retention_days: 30  # How long to keep metrics in database
+  retention_days: 30
+  track_api_calls: true             # Track uma musume API performance
+  track_streaming: true             # Track streaming pipeline performance
