@@ -14,7 +14,7 @@ import (
 // This factory function implements proper dependency injection using interfaces only
 func NewAudioPipelineWithDependencies(db *gorm.DB, guildID string) (AudioPipeline, error) {
 	// Create components in dependency order to prevent circular dependencies
-	
+
 	// Step 1: Create configuration provider (no dependencies)
 	config, err := createConfigProvider()
 	if err != nil {
@@ -91,7 +91,7 @@ func createLoggerFactory(repo AudioRepository) logging.LoggerFactory {
 func createAudioLogger(factory logging.LoggerFactory, guildID string) AudioLogger {
 	// Get centralized logger for audio component
 	baseLogger := factory.CreateAudioLogger(guildID)
-	
+
 	// Wrap with AudioLogger adapter to match the audio package interface
 	return &AudioLoggerAdapter{
 		logger:  baseLogger,
@@ -102,7 +102,8 @@ func createAudioLogger(factory logging.LoggerFactory, guildID string) AudioLogge
 // createStreamProcessor creates a StreamProcessor implementation
 func createStreamProcessor(config ConfigProvider, logger AudioLogger) (StreamProcessor, error) {
 	ffmpegConfig := config.GetFFmpegConfig()
-	return NewFFmpegProcessor(ffmpegConfig, logger), nil
+	ytdlpConfig := config.GetYtDlpConfig()
+	return NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, logger), nil
 }
 
 // createAudioEncoder creates an AudioEncoder implementation
@@ -151,12 +152,12 @@ func (l *LogRepositoryAdapter) SaveLog(entry logging.LogEntry) error {
 		Fields:    entry.Fields,
 		Timestamp: time.Now(),
 	}
-	
+
 	// Ensure Fields map exists
 	if audioLog.Fields == nil {
 		audioLog.Fields = make(map[string]interface{})
 	}
-	
+
 	// Store UserID and ChannelID in Fields since AudioLog model doesn't have them directly
 	if entry.UserID != "" {
 		audioLog.Fields["user_id"] = entry.UserID
@@ -228,12 +229,12 @@ func (a *AudioLoggerAdapter) enrichWithGuildID(fields map[string]interface{}) ma
 	if fields == nil {
 		fields = make(map[string]interface{})
 	}
-	
+
 	// Add guild_id if not already present
 	if _, exists := fields["guild_id"]; !exists && a.guildID != "" {
 		fields["guild_id"] = a.guildID
 	}
-	
+
 	return fields
 }
 

@@ -85,7 +85,7 @@ func NewBasicErrorHandler(config *RetryConfig, logger AudioLogger, repo AudioRep
 	// Create pipeline-specific logger for error handling context
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	pipelineLogger := loggerFactory.CreateAudioLogger(guildID).WithPipeline("error-handler")
-	
+
 	return &BasicErrorHandler{
 		retryConfig:         config,
 		logger:              logger,
@@ -101,10 +101,10 @@ func NewBasicErrorHandlerWithNotifier(config *RetryConfig, logger AudioLogger, r
 	// Create pipeline-specific logger for error handling context
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	pipelineLogger := loggerFactory.CreateAudioLogger(guildID).WithPipeline("error-handler").WithContext(map[string]interface{}{
-		"channel_id": channelID,
+		"channel_id":            channelID,
 		"notifications_enabled": true,
 	})
-	
+
 	return &BasicErrorHandler{
 		retryConfig:         config,
 		logger:              logger,
@@ -122,10 +122,10 @@ func (beh *BasicErrorHandler) SetNotifier(notifier UserNotifier, channelID strin
 	beh.notifier = notifier
 	beh.channelID = channelID
 	beh.enableNotifications = true
-	
+
 	// Update pipeline logger context with notification settings
 	beh.pipelineLogger = beh.pipelineLogger.WithContext(map[string]interface{}{
-		"channel_id": channelID,
+		"channel_id":            channelID,
 		"notifications_enabled": true,
 	})
 }
@@ -133,7 +133,7 @@ func (beh *BasicErrorHandler) SetNotifier(notifier UserNotifier, channelID strin
 // DisableNotifications disables user notifications
 func (beh *BasicErrorHandler) DisableNotifications() {
 	beh.enableNotifications = false
-	
+
 	// Update pipeline logger context
 	beh.pipelineLogger = beh.pipelineLogger.WithContext(map[string]interface{}{
 		"notifications_enabled": false,
@@ -144,15 +144,15 @@ func (beh *BasicErrorHandler) DisableNotifications() {
 func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetry bool, delay time.Duration) {
 	// Create context-specific logger for this error handling session
 	contextLogger := beh.pipelineLogger.WithContext(CreateContextFieldsWithComponent(beh.guildID, "", "", "error-handler"))
-	
+
 	// Log the error first with enhanced context
 	beh.LogError(err, context)
 
 	// Check if the error is retryable
 	if !beh.IsRetryableError(err) {
 		contextLogger.Info("Error is not retryable, skipping retry logic", map[string]interface{}{
-			"error":   err.Error(),
-			"context": context,
+			"error":      err.Error(),
+			"context":    context,
 			"error_type": beh.classifyErrorType(err),
 		})
 
@@ -211,8 +211,8 @@ func (beh *BasicErrorHandler) LogError(err error, context string) {
 	contextLogger := beh.pipelineLogger.WithContext(debugContext)
 	contextLogger.Error("Audio pipeline error occurred", err, map[string]interface{}{
 		"error_type": errorType,
-		"context": context,
-		"retryable": beh.IsRetryableError(err),
+		"context":    context,
+		"retryable":  beh.IsRetryableError(err),
 	})
 
 	// Also log to legacy AudioLogger for backward compatibility
@@ -252,8 +252,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// Network-related errors (retryable)
 	if isNetworkError(err) {
 		beh.pipelineLogger.Debug("Error classified as retryable network error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "network error pattern matched",
 		})
 		return true
@@ -262,8 +262,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// Process-related errors (retryable)
 	if isProcessError(err) {
 		beh.pipelineLogger.Debug("Error classified as retryable process error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "process error pattern matched",
 		})
 		return true
@@ -272,8 +272,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// yt-dlp specific retryable errors
 	if isYtDlpRetryableError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable yt-dlp error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "yt-dlp retryable pattern matched",
 		})
 		return true
@@ -282,8 +282,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// FFmpeg specific retryable errors
 	if isFFmpegRetryableError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable FFmpeg error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "FFmpeg retryable pattern matched",
 		})
 		return true
@@ -292,8 +292,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// Discord API retryable errors
 	if isDiscordRetryableError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable Discord error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "Discord retryable pattern matched",
 		})
 		return true
@@ -302,8 +302,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 	// Temporary file system errors (retryable)
 	if isTemporaryFileSystemError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable filesystem error", map[string]interface{}{
-			"error": err.Error(),
-			"error_type": errorType,
+			"error":                 err.Error(),
+			"error_type":            errorType,
 			"classification_reason": "temporary filesystem error pattern matched",
 		})
 		return true
@@ -311,8 +311,8 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 
 	// Default to non-retryable for unknown errors
 	beh.pipelineLogger.Debug("Error classified as non-retryable", map[string]interface{}{
-		"error": err.Error(),
-		"error_type": errorType,
+		"error":                 err.Error(),
+		"error_type":            errorType,
 		"classification_reason": "no matching retryable pattern",
 	})
 
@@ -395,7 +395,7 @@ func (beh *BasicErrorHandler) classifyErrorType(err error) string {
 func isNetworkError(err error) bool {
 	// Check for net.Error interface
 	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout() || netErr.Temporary()
+		return netErr.Timeout()
 	}
 
 	// Check for common network error patterns
@@ -600,7 +600,7 @@ func CreateMaxRetriesError(lastErr error, attempts int) error {
 func (beh *BasicErrorHandler) createDebugContext(err error, context string, errorType string) map[string]interface{} {
 	// Start with shared context fields using utility function
 	debugContext := CreateContextFieldsWithComponent(beh.guildID, "", "", "error-handler")
-	
+
 	// Add error-specific context
 	debugContext["context"] = context
 	debugContext["error_type"] = errorType
