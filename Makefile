@@ -1,6 +1,6 @@
 # -------- Global config --------
 .SILENT:
-SHELL := /usr/bin/env bash
+SHELL := /bin/sh
 .ONESHELL:
 .DEFAULT_GOAL := build
 
@@ -29,7 +29,7 @@ endif
 export CGO_CFLAGS := -O2 -Wno-stringop-overread -Wno-unused-parameter -Wno-format -Wno-pragma-messages
 
 # Build flags
-GO_BUILD_FLAGS := -trimpath                         # <-- moved here
+GO_BUILD_FLAGS := -trimpath
 LDFLAGS := -s -w \
   -X '$(MODULE)/internal/version.Version=$(EFFECTIVE_VERSION)' \
   -X '$(MODULE)/internal/version.GitCommit=$(COMMIT)' \
@@ -55,36 +55,30 @@ GOOS_LIST   ?= linux darwin windows
 GOARCH_LIST ?= amd64 arm64
 
 build-all:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"
-	mkdir -p dist
-	host_goos="$(go env GOOS)"
-	host_goarch="$(go env GOARCH)"
-	for GOOS in $(GOOS_LIST); do
-	  for GOARCH in $(GOARCH_LIST); do
-	    OUT="dist/$(BIN_NAME)_$${GOOS}_$${GOARCH}"
-	    if [[ "$${GOOS}" == "windows" ]]; then
-	      OUT="$${OUT}.exe"
-	    fi
-
-	    # CGO: enable only on linux; disable elsewhere.
-	    if [[ "$${GOOS}" == "linux" ]]; then
-	      cgo=1
-	    else
-	      cgo=0
-	    fi
-
-	    # If CGO=1 but tuple != host, skip (no cross C toolchain).
-	    if [[ "$$cgo" == "1" && ( "$${GOOS}" != "$$host_goos" || "$${GOARCH}" != "$$host_goarch" ) ]]; then
-	      echo "  ↷ skip $${GOOS}/$${GOARCH} (CGO cross-compile not configured)"
-	      continue
-	    fi
-
-	    echo "  → $${OUT} (CGO_ENABLED=$$cgo)"
+	set -eu; \
+	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"; \
+	mkdir -p dist; \
+	host_goos="$$(go env GOOS)"; \
+	host_goarch="$$(go env GOARCH)"; \
+	for GOOS in $(GOOS_LIST); do \
+	  for GOARCH in $(GOARCH_LIST); do \
+	    OUT="dist/$(BIN_NAME)_$${GOOS}_$${GOARCH}"; \
+	    if [ "$${GOOS}" = "windows" ]; then \
+	      OUT="$${OUT}.exe"; \
+	    fi; \
+	    if [ "$${GOOS}" = "linux" ]; then \
+	      cgo=1; \
+	    else \
+	      cgo=0; \
+	    fi; \
+	    if [ "$$cgo" = "1" ] && [ "$${GOOS}" != "$$host_goos" -o "$${GOARCH}" != "$$host_goarch" ]; then \
+	      echo "  ↷ skip $${GOOS}/$${GOARCH} (CGO cross-compile not configured)"; \
+	      continue; \
+	    fi; \
+	    echo "  → $${OUT} (CGO_ENABLED=$$cgo)"; \
 	    CGO_ENABLED=$$cgo GOOS=$${GOOS} GOARCH=$${GOARCH} \
-	      go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o "$${OUT}" $(ENTRY)
-	  done
+	      go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o "$${OUT}" $(ENTRY); \
+	  done; \
 	done
 
 # Human-friendly version print
@@ -118,9 +112,8 @@ clean:
 
 # -------- Release helpers --------
 verify-tag:
-	@if [[ -z "$$tag" ]]; then echo "Usage: make tag tag=vX.Y.Z"; exit 2; fi
-	@if [[ ! "$$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
-	  echo "❌ Invalid tag: $$tag (want vX.Y.Z)"; exit 2; fi
+	@if [ -z "$$tag" ]; then echo "Usage: make tag tag=vX.Y.Z"; exit 2; fi
+	@echo "$$tag" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' >/dev/null || { echo "❌ Invalid tag: $$tag (want vX.Y.Z)"; exit 2; }
 
 tag: verify-tag
 	git tag -a "$$tag" -m "Release $$tag"
@@ -128,7 +121,7 @@ tag: verify-tag
 	echo "🏷️  Tagged $$tag"
 
 changelog:
-	@if [[ ! -x scripts/changelog.sh ]]; then echo "Missing scripts/changelog.sh"; exit 2; fi
+	@if [ ! -x scripts/changelog.sh ]; then echo "Missing scripts/changelog.sh"; exit 2; fi
 	prev="$$(git describe --tags --abbrev=0 2>/dev/null || true)"; \
 	next="$(EFFECTIVE_VERSION)"; \
 	echo "📝 Updating CHANGELOG.md for range $$prev..$$next"; \
