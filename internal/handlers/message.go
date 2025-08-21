@@ -76,6 +76,8 @@ func MessageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 			commands.UtilityCommand(s, m, args[1:])
 		case "delete":
 			commands.DeleteCommand(s, m, args[1:])
+		case "version", "v":
+			commands.VersionCommand(s, m)
 		default:
 			s.ChannelMessageSend(m.ChannelID, "Unknown command. Try `!help` to see all available commands.")
 		}

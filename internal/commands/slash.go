@@ -91,6 +91,10 @@ func RegisterSlashCommands(s *discordgo.Session) error {
 			Name:        "nowplaying",
 			Description: "Show what's currently playing",
 		},
+		{
+			Name:        "version",
+			Description: "Show bot version information",
+		},
 	}
 
 	log.Println("Registering global slash commands...")

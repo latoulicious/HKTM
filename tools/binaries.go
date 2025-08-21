@@ -179,9 +179,7 @@ func (bv *BinaryValidator) validateFFmpegVersion(version string) error {
 	majorVersionStr := strings.Split(versionParts[0], "-")[0] // Handle versions like "4.4.2-0ubuntu0.22.04.1"
 
 	// Remove leading 'n' if present (e.g., "n7.1.1" -> "7.1.1")
-	if strings.HasPrefix(majorVersionStr, "n") {
-		majorVersionStr = majorVersionStr[1:]
-	}
+	majorVersionStr = strings.TrimPrefix(majorVersionStr, "n")
 
 	majorVersion, err := strconv.Atoi(majorVersionStr)
 	if err != nil {
