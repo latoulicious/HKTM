@@ -53,6 +53,7 @@ dev:
 # Cross-compilation (common triples). Extend if you need more.
 build-all:
 	set -euo pipefail; \
+	export CGO_ENABLED=0; \
 	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"; \
 	mkdir -p dist; \
 	for GOOS in linux darwin windows; do \
