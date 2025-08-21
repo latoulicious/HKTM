@@ -6,12 +6,22 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 var startTime = time.Now()
 
 // AboutCommand displays bot information including version, uptime, memory usage, and Go version
 func AboutCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("about")
+	logger.Info("About command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   m.GuildID,
+		"channel_id": m.ChannelID,
+	})
 	// Calculate uptime
 	uptime := time.Since(startTime)
 	uptimeStr := formatUptime(uptime)
@@ -82,7 +92,13 @@ func AboutCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		},
 	}
 
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil {
+		logger.Error("Failed to send about embed", err, map[string]interface{}{
+			"channel_id": m.ChannelID,
+			"guild_id":   m.GuildID,
+		})
+	}
 }
 
 // formatUptime formats the uptime duration into a human-readable string

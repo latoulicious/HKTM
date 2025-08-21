@@ -4,6 +4,7 @@ import (
 	"math/rand"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // gremlinImages contains the list of image URLs for the gremlin command
@@ -27,7 +28,20 @@ var gremlinFooters = []string{
 
 // GremlinCommand sends a random image from the gremlin collection
 func GremlinCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("gremlin")
+	logger.Info("Gremlin command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   m.GuildID,
+		"channel_id": m.ChannelID,
+	})
 	if len(gremlinImages) == 0 {
+		logger.Error("No gremlin images available", nil, map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+		})
 		s.ChannelMessageSend(m.ChannelID, "No Maachan gremlin images available!")
 		return
 	}
@@ -49,5 +63,18 @@ func GremlinCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		},
 	}
 
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil {
+		logger.Error("Failed to send gremlin embed", err, map[string]interface{}{
+			"channel_id": m.ChannelID,
+			"guild_id":   m.GuildID,
+		})
+	} else {
+		logger.Debug("Gremlin image sent successfully", map[string]interface{}{
+			"user_id":         m.Author.ID,
+			"guild_id":        m.GuildID,
+			"selected_image":  randomImage,
+			"selected_footer": randomFooter,
+		})
+	}
 }

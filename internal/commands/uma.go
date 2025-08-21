@@ -9,6 +9,7 @@ import (
 	"github.com/latoulicious/HKTM/internal/config"
 	"github.com/latoulicious/HKTM/pkg/database/models"
 	"github.com/latoulicious/HKTM/pkg/database/repository"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma"
 	"github.com/latoulicious/HKTM/pkg/uma/handler"
 	"github.com/latoulicious/HKTM/pkg/uma/navigation"
@@ -48,35 +49,70 @@ func InitializeGametoraClient(cfg interface{}) {
 
 // UmaCommand handles Uma Musume related commands
 func UmaCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("uma")
+	logger.Info("Uma command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   m.GuildID,
+		"channel_id": m.ChannelID,
+		"args_count": len(args),
+	})
 	if len(args) == 0 {
+		logger.Warn("Uma command called without subcommand", map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+		})
 		s.ChannelMessageSend(m.ChannelID, "❌ Please specify a subcommand.\n\n**Usage:** `!uma char <character name>`\n**Example:** `!uma char Oguri Cap`")
 		return
 	}
 
 	subcommand := strings.ToLower(args[0])
 
+	logger.Info("Uma subcommand called", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"subcommand": subcommand,
+	})
+
 	switch subcommand {
 	case "char", "character":
-		CharacterCommand(s, m, args[1:])
+		CharacterCommand(s, m, args[1:], logger)
 	case "support":
-		SupportCommand(s, m, args[1:])
+		SupportCommand(s, m, args[1:], logger)
 	case "skills":
-		SkillsCommand(s, m, args[1:])
+		SkillsCommand(s, m, args[1:], logger)
 	case "sync":
-		SyncCommand(s, m, args[1:])
+		SyncCommand(s, m, args[1:], logger)
 	case "refresh":
-		StableRefreshCommand(s, m, args[1:])
+		StableRefreshCommand(s, m, args[1:], logger)
 	case "cache":
-		CacheStatsCommand(s, m, args[1:])
+		CacheStatsCommand(s, m, args[1:], logger)
 	default:
+		logger.Warn("Unknown uma subcommand", map[string]interface{}{
+			"user_id":    m.Author.ID,
+			"guild_id":   m.GuildID,
+			"subcommand": subcommand,
+		})
 		s.ChannelMessageSend(m.ChannelID, "❌ Unknown subcommand.\n\n**Available subcommands:**\n• `char <name>` - Search for a character\n• `support <name>` - Search for a support card (list view)\n• `skills <name>` - Get skills for a support card (Gametora API)\n• `sync` - Sync all data from API to database\n• `refresh` - Refresh the Gametora API build ID\n• `cache` - Show cache statistics\n\n**Examples:**\n• `!uma char Oguri Cap`\n• `!uma support daring tact`\n• `!uma skills daring tact`\n• `!uma sync`\n• `!uma refresh`\n• `!uma cache`")
 	}
 }
 
 // CharacterCommand searches for and displays character information
-func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Character search command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
+
 	// Check if user provided a character name
 	if len(args) == 0 {
+		logger.Warn("Character command called without character name", map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+		})
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a character name to search for.\n\n**Usage:** `!uma char <character name>`\n**Example:** `!uma char Oguri Cap`")
 		return
 	}
@@ -84,12 +120,23 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Join the arguments to form the search query
 	query := strings.Join(args, " ")
 
+	logger.Info("Searching for character", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+		"query":    query,
+	})
+
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for character...")
 
 	// Search for character using service layer with database caching
 	result, err := characterService.SearchCharacter(query)
 	if err != nil {
+		logger.Error("Character search failed", err, map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+			"query":    query,
+		})
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error searching for character: %v", err))
 		return
 	}
@@ -165,7 +212,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 }
 
 // SupportCommand searches for and displays support card information
-func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Support card search command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
 	// Check if user provided a support card name
 	if len(args) == 0 {
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a support card name to search for.\n\n**Usage:** `!uma support <support card name>`\n**Example:** `!uma support daring tact`")
@@ -299,7 +351,12 @@ func createSupportCardEmbed(supportCard *shared.SupportCard) *discordgo.MessageE
 }
 
 // SkillsCommand retrieves skills for a support card using the Gametora API
-func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Skills command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
 	// Check if user provided a support card name
 	if len(args) == 0 {
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a support card name to get skills for.\n\n**Usage:** `!uma skills <support card name>`\n**Example:** `!uma skills daring tact`")
@@ -506,7 +563,11 @@ func createSimplifiedSkillsEmbed(supportCard *shared.SimplifiedSupportCard) *dis
 }
 
 // StableRefreshCommand refreshes the build ID for the Gametora API
-func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Stable refresh command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Refreshing Gametora API build ID...")
 
@@ -635,7 +696,11 @@ func createMultiVersionSupportCardEmbed(supportCards []shared.SupportCard) *disc
 }
 
 // SyncCommand syncs all data from API to database
-func SyncCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func SyncCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Sync command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
 	// Send initial message
 	msg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Starting data sync from API to database...\n\nThis may take a few minutes.")
 
@@ -661,7 +726,11 @@ func SyncCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 }
 
 // CacheStatsCommand shows cache statistics
-func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Cache stats command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
 	// Get character count
 	var characterCount int64
 	umaDB.Model(&models.Character{}).Count(&characterCount)

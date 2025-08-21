@@ -7,11 +7,23 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/pkg/common"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // ClearCommand handles the !clear command to empty the queue
 func ClearCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	guildID := m.GuildID
+
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("clear")
+	logger.Info("Clear command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   guildID,
+		"channel_id": m.ChannelID,
+		"args_count": len(args),
+	})
 
 	// Update activity
 	updateActivity(guildID)
@@ -19,12 +31,20 @@ func ClearCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 	queue := getQueue(guildID)
 
 	if queue == nil {
+		logger.Error("No queue found for guild", nil, map[string]interface{}{
+			"guild_id": guildID,
+			"user_id":  m.Author.ID,
+		})
 		sendEmbedMessage(s, m.ChannelID, "❌ Error", "No queue found for this server.", 0xff0000)
 		return
 	}
 
 	// Check if queue is empty
 	if queue.Size() == 0 && queue.Current() == nil {
+		logger.Info("Clear command called on empty queue", map[string]interface{}{
+			"guild_id": guildID,
+			"user_id":  m.Author.ID,
+		})
 		sendEmbedMessage(s, m.ChannelID, "📭 Queue Already Empty", "The queue is already empty.", 0x808080)
 		return
 	}
@@ -35,10 +55,18 @@ func ClearCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 		switch arg {
 		case "confirm":
 			// User confirmed the clear
-			clearQueueInternal(s, m, queue)
+			logger.Info("Queue clear confirmed", map[string]interface{}{
+				"guild_id": guildID,
+				"user_id":  m.Author.ID,
+			})
+			clearQueueInternal(s, m, queue, logger)
 			return
 		case "cancel":
 			// User cancelled the clear
+			logger.Info("Queue clear cancelled", map[string]interface{}{
+				"guild_id": guildID,
+				"user_id":  m.Author.ID,
+			})
 			sendEmbedMessage(s, m.ChannelID, "❌ Cancelled", "Queue clear operation cancelled.", 0x808080)
 			return
 		}
@@ -49,6 +77,12 @@ func ClearCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 
 	// If user is not admin and there are multiple songs, ask for confirmation
 	if !hasAdmin && queue.Size() > 3 {
+		logger.Info("Requesting confirmation for queue clear", map[string]interface{}{
+			"guild_id":   guildID,
+			"user_id":    m.Author.ID,
+			"queue_size": queue.Size(),
+			"has_admin":  hasAdmin,
+		})
 		embed := &discordgo.MessageEmbed{
 			Title:     "⚠️ Confirm Queue Clear",
 			Color:     0xffa500, // Orange
@@ -71,18 +105,30 @@ func ClearCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 				},
 			},
 		}
-		s.ChannelMessageSendEmbed(m.ChannelID, embed)
+		_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+		if err != nil {
+			logger.Error("Failed to send confirmation embed", err, map[string]interface{}{
+				"channel_id": m.ChannelID,
+				"guild_id":   m.GuildID,
+			})
+		}
 		return
 	}
 
 	// Clear the queue
-	clearQueueInternal(s, m, queue)
+	clearQueueInternal(s, m, queue, logger)
 }
 
 // clearQueueInternal performs the actual queue clearing
-func clearQueueInternal(s *discordgo.Session, m *discordgo.MessageCreate, queue *common.MusicQueue) {
+func clearQueueInternal(s *discordgo.Session, m *discordgo.MessageCreate, queue *common.MusicQueue, logger logging.Logger) {
 	// Get queue size before clearing for the message
 	queueSize := queue.Size()
+
+	logger.Info("Clearing queue", map[string]interface{}{
+		"guild_id":          m.GuildID,
+		"user_id":           m.Author.ID,
+		"queue_size_before": queueSize,
+	})
 
 	// Clear the queue
 	queue.Clear()
@@ -109,7 +155,13 @@ func clearQueueInternal(s *discordgo.Session, m *discordgo.MessageCreate, queue 
 			},
 		},
 	}
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil {
+		logger.Error("Failed to send queue cleared embed", err, map[string]interface{}{
+			"channel_id": m.ChannelID,
+			"guild_id":   m.GuildID,
+		})
+	}
 }
 
 // hasAdminPermissions checks if a user has admin permissions
