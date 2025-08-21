@@ -1,4 +1,4 @@
-package uma
+package shared
 
 import "fmt"
 

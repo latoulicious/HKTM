@@ -6,11 +6,25 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/pkg/common"
+	"github.com/latoulicious/HKTM/pkg/embed"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // NowPlayingCommand handles the nowplaying command
 func NowPlayingCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	guildID := m.GuildID
+
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("nowplaying")
+	logger.Info("Now playing command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   guildID,
+		"channel_id": m.ChannelID,
+	})
+
+	// Initialize centralized embed builder
+	embedBuilder := embed.GetGlobalAudioEmbedBuilder()
 
 	// Update activity for idle monitoring
 	updateActivity(guildID)
@@ -18,53 +32,89 @@ func NowPlayingCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Get the queue for this guild
 	queue := getQueue(guildID)
 	if queue == nil {
-		sendNothingPlayingEmbed(s, m.ChannelID)
+		logger.Error("No queue found for guild", nil, map[string]interface{}{
+			"guild_id": guildID,
+			"user_id":  m.Author.ID,
+		})
+		
+		infoEmbed := embedBuilder.Info("🎵 Now Playing", "Nothing is currently playing. Use `/play` to start playing music.")
+		s.ChannelMessageSendEmbed(m.ChannelID, infoEmbed)
 		return
 	}
 
 	// Get current playing item
 	currentItem := queue.Current()
 	if currentItem == nil || !queue.IsPlaying() {
-		sendNothingPlayingEmbed(s, m.ChannelID)
+		logger.Info("No current item playing", map[string]interface{}{
+			"guild_id":     guildID,
+			"user_id":      m.Author.ID,
+			"has_current":  currentItem != nil,
+			"is_playing":   queue.IsPlaying(),
+		})
+		
+		infoEmbed := embedBuilder.Info("🎵 Now Playing", "Nothing is currently playing. Use `/play` to start playing music.")
+		s.ChannelMessageSendEmbed(m.ChannelID, infoEmbed)
 		return
 	}
+
+	logger.Info("Displaying now playing info", map[string]interface{}{
+		"guild_id":     guildID,
+		"user_id":      m.Author.ID,
+		"song_title":   currentItem.Title,
+		"requested_by": currentItem.RequestedBy,
+		"duration":     currentItem.Duration.String(),
+	})
 
 	// Get pipeline for duration/position info if available
 	pipeline := queue.GetPipeline()
 	voiceConn := queue.GetVoiceConnection()
 
-	// Send now playing embed
-	sendNowPlayingEmbed(s, m.ChannelID, currentItem, pipeline, voiceConn)
+	// Send now playing embed using centralized system
+	sendNowPlayingEmbed(s, m.ChannelID, currentItem, pipeline, voiceConn, embedBuilder, logger)
 }
 
-// sendNothingPlayingEmbed sends an embed when nothing is playing
-func sendNothingPlayingEmbed(s *discordgo.Session, channelID string) {
-	embed := &discordgo.MessageEmbed{
-		Title:       "🎵 Now Playing",
-		Description: "Nothing is currently playing",
-		Color:       0x808080, // Gray color
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Use /play to start playing music",
-		},
+// sendNowPlayingEmbed sends a detailed now playing embed using centralized systems
+func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.QueueItem, pipeline interface{}, voiceConn *discordgo.VoiceConnection, embedBuilder embed.AudioEmbedBuilder, logger logging.Logger) {
+	// Determine connection status
+	var isPlaying bool
+
+	// Handle both old and new pipeline types
+	if pipeline != nil {
+		// Try new AudioPipeline interface first
+		if newPipeline, ok := pipeline.(interface{ IsPlaying() bool }); ok {
+			isPlaying = newPipeline.IsPlaying()
+		} else if oldPipeline, ok := pipeline.(*common.AudioPipeline); ok {
+			// Fallback to old AudioPipeline type
+			isPlaying = oldPipeline.IsPlaying()
+		}
 	}
 
-	s.ChannelMessageSendEmbed(channelID, embed)
-}
+	logger.Debug("Pipeline status checked", map[string]interface{}{
+		"has_pipeline":    pipeline != nil,
+		"is_playing":      isPlaying,
+		"voice_ready":     voiceConn != nil && voiceConn.Ready,
+	})
 
-// sendNowPlayingEmbed sends a detailed now playing embed
-func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.QueueItem, pipeline *common.AudioPipeline, voiceConn *discordgo.VoiceConnection) {
-	// Build description with track info
-	description := fmt.Sprintf("**%s**", item.Title)
+	// Use centralized embed system for now playing
+	var nowPlayingEmbed *discordgo.MessageEmbed
+	
+	// Get the original URL for the embed
+	originalURL := item.OriginalURL
+	if originalURL == "" {
+		// Fallback to constructing YouTube URL if we have video ID
+		if item.VideoID != "" {
+			originalURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", item.VideoID)
+		}
+	}
 
-	// Show total duration instead of playback progress
-	durationStr := formatDuration(item.Duration)
+	// Create now playing embed using centralized system
+	nowPlayingEmbed = embedBuilder.NowPlaying(item.Title, originalURL, item.Duration)
 
-	// Determine connection status
-	var statusEmoji string
-	var statusText string
-
-	if pipeline != nil && pipeline.IsPlaying() {
+	// Add additional fields for enhanced information
+	statusEmoji := "🔴"
+	statusText := "Stopped"
+	
+	if isPlaying {
 		if voiceConn != nil && voiceConn.Ready {
 			statusEmoji = "🟢"
 			statusText = "Playing"
@@ -72,61 +122,43 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 			statusEmoji = "🟡"
 			statusText = "Connecting..."
 		}
-	} else {
-		statusEmoji = "🔴"
-		statusText = "Stopped"
 	}
 
-	embed := &discordgo.MessageEmbed{
-		Title:       "🎵 Now Playing",
-		Description: description,
-		Color:       0x00ff00, // Green color
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Requested by",
-				Value:  item.RequestedBy,
-				Inline: true,
-			},
-			{
-				Name:   "Duration",
-				Value:  durationStr,
-				Inline: true,
-			},
-			{
-				Name:   "Status",
-				Value:  fmt.Sprintf("%s %s", statusEmoji, statusText),
-				Inline: true,
-			},
-			{
-				Name:   "Added to queue",
-				Value:  item.AddedAt.Format("Jan 2, 2006 3:04 PM"),
-				Inline: false,
-			},
+	// Add custom fields to the centralized embed
+	nowPlayingEmbed.Fields = append(nowPlayingEmbed.Fields, 
+		&discordgo.MessageEmbedField{
+			Name:   "Requested by",
+			Value:  item.RequestedBy,
+			Inline: true,
 		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae",
+		&discordgo.MessageEmbedField{
+			Name:   "Status",
+			Value:  fmt.Sprintf("%s %s", statusEmoji, statusText),
+			Inline: true,
 		},
-	}
+		&discordgo.MessageEmbedField{
+			Name:   "Added to queue",
+			Value:  item.AddedAt.Format("Jan 2, 2006 3:04 PM"),
+			Inline: false,
+		},
+	)
 
 	// Add YouTube thumbnail if video ID is available
 	if item.VideoID != "" {
 		thumbnailURL := common.GetYouTubeThumbnailURL(item.VideoID)
-		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+		nowPlayingEmbed.Thumbnail = &discordgo.MessageEmbedThumbnail{
 			URL: thumbnailURL,
 		}
 	}
 
-	// Add YouTube link if original URL is available
-	if item.OriginalURL != "" && common.IsYouTubeURL(item.OriginalURL) {
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   "🔗 YouTube Link",
-			Value:  fmt.Sprintf("[Open in YouTube](%s)", item.OriginalURL),
-			Inline: true,
+	// Send the embed
+	_, err := s.ChannelMessageSendEmbed(channelID, nowPlayingEmbed)
+	if err != nil {
+		logger.Error("Failed to send now playing embed", err, map[string]interface{}{
+			"channel_id": channelID,
+			"song_title": item.Title,
 		})
 	}
-
-	s.ChannelMessageSendEmbed(channelID, embed)
 }
 
 // formatDuration formats a duration into a human-readable string

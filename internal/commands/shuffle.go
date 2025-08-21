@@ -8,11 +8,23 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/pkg/common"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // ShuffleCommand handles the !shuffle command to shuffle the queue
 func ShuffleCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	guildID := m.GuildID
+
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("shuffle")
+	logger.Info("Shuffle command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   guildID,
+		"channel_id": m.ChannelID,
+		"args_count": len(args),
+	})
 
 	// Update activity
 	updateActivity(guildID)
@@ -20,6 +32,10 @@ func ShuffleCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	queue := getQueue(guildID)
 
 	if queue == nil {
+		logger.Error("No queue found for guild", nil, map[string]interface{}{
+			"guild_id": guildID,
+			"user_id":  m.Author.ID,
+		})
 		sendEmbedMessage(s, m.ChannelID, "❌ Error", "No queue found for this server.", 0xff0000)
 		return
 	}
@@ -27,6 +43,11 @@ func ShuffleCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Check if queue has enough songs to shuffle
 	queueSize := queue.Size()
 	if queueSize < 2 {
+		logger.Info("Shuffle command called with insufficient songs", map[string]interface{}{
+			"guild_id":   guildID,
+			"user_id":    m.Author.ID,
+			"queue_size": queueSize,
+		})
 		sendEmbedMessage(s, m.ChannelID, "📭 Not Enough Songs", "Need at least 2 songs to shuffle the queue.", 0x808080)
 		return
 	}
@@ -34,9 +55,19 @@ func ShuffleCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Get current queue items
 	items := queue.List()
 	if len(items) == 0 {
+		logger.Info("Shuffle command called on empty queue", map[string]interface{}{
+			"guild_id": guildID,
+			"user_id":  m.Author.ID,
+		})
 		sendEmbedMessage(s, m.ChannelID, "📭 Queue Empty", "No songs in queue to shuffle.", 0x808080)
 		return
 	}
+
+	logger.Info("Shuffling queue", map[string]interface{}{
+		"guild_id":   guildID,
+		"user_id":    m.Author.ID,
+		"queue_size": queueSize,
+	})
 
 	// Shuffle the queue
 	shuffledItems := shuffleQueueItems(items)
@@ -83,7 +114,20 @@ func ShuffleCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 		}
 	}
 
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil {
+		logger.Error("Failed to send shuffle embed", err, map[string]interface{}{
+			"channel_id": m.ChannelID,
+			"guild_id":   guildID,
+		})
+	} else {
+		logger.Info("Queue shuffle completed successfully", map[string]interface{}{
+			"guild_id":     guildID,
+			"user_id":      m.Author.ID,
+			"queue_size":   queueSize,
+			"announce_top": announceTop,
+		})
+	}
 }
 
 // shuffleQueueItems shuffles a slice of queue items using Fisher-Yates algorithm

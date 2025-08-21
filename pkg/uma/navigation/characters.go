@@ -5,13 +5,14 @@ import (
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 // NavigationState tracks the current state of image navigation
 type NavigationState struct {
-	Character    *uma.Character
-	ImagesResult *uma.CharacterImagesResult
+	Character    *shared.Character
+	ImagesResult *shared.CharacterImagesResult
 	CurrentIndex int
 	MessageID    string
 	ChannelID    string
@@ -75,7 +76,7 @@ func (nm *NavigationManager) HandleReaction(s *discordgo.Session, r *discordgo.M
 		}
 	case "🔄":
 		// Refresh images (re-fetch from API)
-		client := uma.NewClient()
+		client := handler.NewClient()
 		imagesResult := client.GetCharacterImages(state.Character.ID)
 		if imagesResult.Found {
 			state.ImagesResult = imagesResult
@@ -98,7 +99,7 @@ func (nm *NavigationManager) HandleReaction(s *discordgo.Session, r *discordgo.M
 }
 
 // RegisterNavigation registers a new Uma character navigation
-func (nm *NavigationManager) RegisterNavigation(messageID string, character *uma.Character, imagesResult *uma.CharacterImagesResult, channelID string) {
+func (nm *NavigationManager) RegisterNavigation(messageID string, character *shared.Character, imagesResult *shared.CharacterImagesResult, channelID string) {
 	nm.mutex.Lock()
 	defer nm.mutex.Unlock()
 
@@ -120,7 +121,7 @@ func (nm *NavigationManager) CleanupNavigation(messageID string) {
 }
 
 // getTotalImages calculates the total number of images across all categories
-func (nm *NavigationManager) getTotalImages(imagesResult *uma.CharacterImagesResult) int {
+func (nm *NavigationManager) getTotalImages(imagesResult *shared.CharacterImagesResult) int {
 	totalImages := 0
 	if imagesResult.Found {
 		for _, category := range imagesResult.Images {
@@ -131,12 +132,12 @@ func (nm *NavigationManager) getTotalImages(imagesResult *uma.CharacterImagesRes
 }
 
 // CreateCharacterEmbed creates an embed for character display with image navigation
-func (nm *NavigationManager) CreateCharacterEmbed(character *uma.Character, imagesResult *uma.CharacterImagesResult, imageIndex int) *discordgo.MessageEmbed {
+func (nm *NavigationManager) CreateCharacterEmbed(character *shared.Character, imagesResult *shared.CharacterImagesResult, imageIndex int) *discordgo.MessageEmbed {
 	return nm.createCharacterEmbed(character, imagesResult, imageIndex)
 }
 
 // createCharacterEmbed creates an embed for character display with image navigation
-func (nm *NavigationManager) createCharacterEmbed(character *uma.Character, imagesResult *uma.CharacterImagesResult, imageIndex int) *discordgo.MessageEmbed {
+func (nm *NavigationManager) createCharacterEmbed(character *shared.Character, imagesResult *shared.CharacterImagesResult, imageIndex int) *discordgo.MessageEmbed {
 	// Build footer text
 	footerText := "Data from umapyoi.net"
 	if imagesResult.Found && len(imagesResult.Images) > 0 {
@@ -177,7 +178,7 @@ func (nm *NavigationManager) createCharacterEmbed(character *uma.Character, imag
 	// Add character image if available
 	if imagesResult.Found && len(imagesResult.Images) > 0 {
 		// Flatten all images from all categories for navigation
-		var allImages []uma.CharacterImage
+		var allImages []shared.CharacterImage
 		var allCategories []string
 		for _, category := range imagesResult.Images {
 			for _, image := range category.Images {

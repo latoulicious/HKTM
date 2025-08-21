@@ -5,10 +5,20 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 // ShowHelpCommand displays all available commands with their descriptions using embeds
 func ShowHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("help")
+	logger.Info("Help command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   m.GuildID,
+		"channel_id": m.ChannelID,
+	})
 	// Create embed
 	embed := &discordgo.MessageEmbed{
 		Title: "Here are all the available commands for the bot:",
@@ -85,7 +95,13 @@ func ShowHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		},
 	}
 
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if err != nil {
+		logger.Error("Failed to send help embed", err, map[string]interface{}{
+			"channel_id": m.ChannelID,
+			"guild_id":   m.GuildID,
+		})
+	}
 }
 
 // Unused commands

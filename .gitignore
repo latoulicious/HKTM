@@ -30,6 +30,9 @@
 # VSCode
 .vscode
 
+# Kiro
+.kiro/
+
 # Go workspace file
 go.work
 

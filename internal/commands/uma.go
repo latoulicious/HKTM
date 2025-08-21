@@ -7,57 +7,112 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/internal/config"
-	"github.com/latoulicious/HKTM/pkg/database"
+	"github.com/latoulicious/HKTM/pkg/database/models"
+	"github.com/latoulicious/HKTM/pkg/database/repository"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
 	"github.com/latoulicious/HKTM/pkg/uma/navigation"
+	"github.com/latoulicious/HKTM/pkg/uma/service"
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
+	"gorm.io/gorm"
 )
 
-var umaClient = uma.NewClient()
+var umaClient = handler.NewClient()
 var navigationManager = navigation.GetNavigationManager()
-var gametoraClient *uma.GametoraClient
-var umaDB *database.Database
+var gametoraClient *handler.GametoraClient
+var umaDB *gorm.DB
+var umaService *uma.Service
+var characterService uma.CharacterServiceInterface
+var supportCardService uma.SupportCardServiceInterface
 
 // InitializeUmaCommands initializes the UMA commands with database for caching
-func InitializeUmaCommands(db *database.Database) {
+func InitializeUmaCommands(db *gorm.DB) {
 	umaDB = db
+
+	// Initialize repositories
+	characterRepo := repository.NewCharacterRepository(db)
+	supportCardRepo := repository.NewSupportCardRepository(db)
+
+	// Initialize service layer with database caching
+	umaService = uma.NewService(characterRepo, supportCardRepo, umaClient, gametoraClient)
+	characterService = service.NewCharacterService(umaService)
+	supportCardService = service.NewSupportCardService(umaService)
 }
 
 // InitializeGametoraClient initializes the global gametora client with configuration
 func InitializeGametoraClient(cfg interface{}) {
 	if config, ok := cfg.(*config.Config); ok {
-		gametoraClient = uma.NewGametoraClient(config)
+		gametoraClient = handler.NewGametoraClient(config)
 	}
 }
 
 // UmaCommand handles Uma Musume related commands
 func UmaCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+	// Initialize centralized logging for this command
+	loggerFactory := logging.GetGlobalLoggerFactory()
+	logger := loggerFactory.CreateCommandLogger("uma")
+	logger.Info("Uma command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"username":   m.Author.Username,
+		"guild_id":   m.GuildID,
+		"channel_id": m.ChannelID,
+		"args_count": len(args),
+	})
 	if len(args) == 0 {
+		logger.Warn("Uma command called without subcommand", map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+		})
 		s.ChannelMessageSend(m.ChannelID, "❌ Please specify a subcommand.\n\n**Usage:** `!uma char <character name>`\n**Example:** `!uma char Oguri Cap`")
 		return
 	}
 
 	subcommand := strings.ToLower(args[0])
 
+	logger.Info("Uma subcommand called", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"subcommand": subcommand,
+	})
+
 	switch subcommand {
 	case "char", "character":
-		CharacterCommand(s, m, args[1:])
+		CharacterCommand(s, m, args[1:], logger)
 	case "support":
-		SupportCommand(s, m, args[1:])
+		SupportCommand(s, m, args[1:], logger)
 	case "skills":
-		SkillsCommand(s, m, args[1:])
+		SkillsCommand(s, m, args[1:], logger)
+	case "sync":
+		SyncCommand(s, m, args[1:], logger)
 	case "refresh":
-		StableRefreshCommand(s, m, args[1:])
+		StableRefreshCommand(s, m, args[1:], logger)
 	case "cache":
-		CacheStatsCommand(s, m, args[1:])
+		CacheStatsCommand(s, m, args[1:], logger)
 	default:
-		s.ChannelMessageSend(m.ChannelID, "❌ Unknown subcommand.\n\n**Available subcommands:**\n• `char <name>` - Search for a character\n• `support <name>` - Search for a support card (list view)\n• `skills <name>` - Get skills for a support card (Gametora API)\n• `refresh` - Refresh the Gametora API build ID\n• `cache` - Show cache statistics\n\n**Examples:**\n• `!uma char Oguri Cap`\n• `!uma support daring tact`\n• `!uma skills daring tact`\n• `!uma refresh`\n• `!uma cache`")
+		logger.Warn("Unknown uma subcommand", map[string]interface{}{
+			"user_id":    m.Author.ID,
+			"guild_id":   m.GuildID,
+			"subcommand": subcommand,
+		})
+		s.ChannelMessageSend(m.ChannelID, "❌ Unknown subcommand.\n\n**Available subcommands:**\n• `char <name>` - Search for a character\n• `support <name>` - Search for a support card (list view)\n• `skills <name>` - Get skills for a support card (Gametora API)\n• `sync` - Sync all data from API to database\n• `refresh` - Refresh the Gametora API build ID\n• `cache` - Show cache statistics\n\n**Examples:**\n• `!uma char Oguri Cap`\n• `!uma support daring tact`\n• `!uma skills daring tact`\n• `!uma sync`\n• `!uma refresh`\n• `!uma cache`")
 	}
 }
 
 // CharacterCommand searches for and displays character information
-func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Character search command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
+
 	// Check if user provided a character name
 	if len(args) == 0 {
+		logger.Warn("Character command called without character name", map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+		})
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a character name to search for.\n\n**Usage:** `!uma char <character name>`\n**Example:** `!uma char Oguri Cap`")
 		return
 	}
@@ -65,31 +120,25 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 	// Join the arguments to form the search query
 	query := strings.Join(args, " ")
 
+	logger.Info("Searching for character", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+		"query":    query,
+	})
+
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for character...")
 
-	// Search for character with caching
-	var result *uma.CharacterSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedCharacterSearch(query); err == nil && cached != nil {
-			result = cached
-		} else {
-			// If not in cache, search using the original client
-			result = umaClient.SearchCharacter(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheCharacterSearch(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache character search: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = umaClient.SearchCharacter(query)
+	// Search for character using service layer with database caching
+	result, err := characterService.SearchCharacter(query)
+	if err != nil {
+		logger.Error("Character search failed", err, map[string]interface{}{
+			"user_id":  m.Author.ID,
+			"guild_id": m.GuildID,
+			"query":    query,
+		})
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error searching for character: %v", err))
+		return
 	}
 
 	// Delete the loading message
@@ -126,28 +175,11 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 		return
 	}
 
-	// Fetch character images with caching
-	var imagesResult *uma.CharacterImagesResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedCharacterImages(result.Character.ID); err == nil && cached != nil {
-			imagesResult = cached
-		} else {
-			// If not in cache, fetch using the original client
-			imagesResult = umaClient.GetCharacterImages(result.Character.ID)
-
-			// Cache the result if found or if it's a valid error response
-			if imagesResult != nil {
-				if err := umaDB.CacheCharacterImages(result.Character.ID, imagesResult, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache character images: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		imagesResult = umaClient.GetCharacterImages(result.Character.ID)
+	// Fetch character images using service layer with database caching
+	imagesResult, err := characterService.GetCharacterImages(result.Character.ID)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error fetching character images: %v", err))
+		return
 	}
 
 	// Create success embed with image navigation
@@ -180,7 +212,12 @@ func CharacterCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []s
 }
 
 // SupportCommand searches for and displays support card information
-func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Support card search command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
 	// Check if user provided a support card name
 	if len(args) == 0 {
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a support card name to search for.\n\n**Usage:** `!uma support <support card name>`\n**Example:** `!uma support daring tact`")
@@ -193,28 +230,11 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card...")
 
-	// Search for support card with caching
-	var result *uma.SupportCardSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedSupportCardSearch(query); err == nil && cached != nil {
-			result = cached
-		} else {
-			// If not in cache, search using the original client
-			result = umaClient.SearchSupportCard(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheSupportCardSearch(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache support card search: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = umaClient.SearchSupportCard(query)
+	// Search for support card using service layer with database caching
+	result, err := supportCardService.SearchSupportCard(query)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error searching for support card: %v", err))
+		return
 	}
 
 	// Delete the loading message
@@ -260,15 +280,15 @@ func SupportCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []str
 	}
 
 	// Send the embed
-	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
-	if err != nil {
+	_, sendErr := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+	if sendErr != nil {
 		s.ChannelMessageSend(m.ChannelID, "❌ Failed to send support card information.")
 		return
 	}
 }
 
 // createSupportCardEmbed creates an embed for a support card
-func createSupportCardEmbed(supportCard *uma.SupportCard) *discordgo.MessageEmbed {
+func createSupportCardEmbed(supportCard *shared.SupportCard) *discordgo.MessageEmbed {
 	// Determine embed color based on rarity
 	var color int
 	switch supportCard.RarityString {
@@ -331,7 +351,12 @@ func createSupportCardEmbed(supportCard *uma.SupportCard) *discordgo.MessageEmbe
 }
 
 // SkillsCommand retrieves skills for a support card using the Gametora API
-func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Skills command executed", map[string]interface{}{
+		"user_id":    m.Author.ID,
+		"guild_id":   m.GuildID,
+		"args_count": len(args),
+	})
 	// Check if user provided a support card name
 	if len(args) == 0 {
 		s.ChannelMessageSend(m.ChannelID, "❌ Please provide a support card name to get skills for.\n\n**Usage:** `!uma skills <support card name>`\n**Example:** `!uma skills daring tact`")
@@ -344,29 +369,8 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Searching for support card skills using Gametora API...")
 
-	// Search for support card using Gametora API with caching
-	var result *uma.SimplifiedGametoraSearchResult
-
-	// Check database cache first
-	if umaDB != nil {
-		if cached, err := umaDB.GetCachedGametoraSkills(query); err == nil && cached != nil {
-			result = cached
-		} else {
-			// If not in cache, search using the Gametora client
-			result = gametoraClient.SearchSimplifiedSupportCard(query)
-
-			// Cache the result if found or if it's a valid error response
-			if result != nil {
-				if err := umaDB.CacheGametoraSkills(query, result, 24*time.Hour); err != nil {
-					// Log error but don't fail the request
-					fmt.Printf("Failed to cache Gametora skills: %v\n", err)
-				}
-			}
-		}
-	} else {
-		// Fallback to original client if database is not available
-		result = gametoraClient.SearchSimplifiedSupportCard(query)
-	}
+	// Search for support card using Gametora API
+	result := gametoraClient.SearchSimplifiedSupportCard(query)
 
 	// Delete the loading message
 	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
@@ -460,7 +464,7 @@ func SkillsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 }
 
 // createSimplifiedSkillsEmbed creates a simplified embed showing only skills for a support card
-func createSimplifiedSkillsEmbed(supportCard *uma.SimplifiedSupportCard) *discordgo.MessageEmbed {
+func createSimplifiedSkillsEmbed(supportCard *shared.SimplifiedSupportCard) *discordgo.MessageEmbed {
 	// Determine embed color based on rarity
 	var color int
 	switch supportCard.Rarity {
@@ -559,7 +563,11 @@ func createSimplifiedSkillsEmbed(supportCard *uma.SimplifiedSupportCard) *discor
 }
 
 // StableRefreshCommand refreshes the build ID for the Gametora API
-func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Stable refresh command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
 	// Send a loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Refreshing Gametora API build ID...")
 
@@ -605,7 +613,7 @@ func StableRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate, args
 }
 
 // createMultiVersionSupportCardEmbed creates an embed showing all versions of a support card
-func createMultiVersionSupportCardEmbed(supportCards []uma.SupportCard) *discordgo.MessageEmbed {
+func createMultiVersionSupportCardEmbed(supportCards []shared.SupportCard) *discordgo.MessageEmbed {
 	// Use the highest rarity card for the main embed info
 	mainCard := supportCards[0]
 
@@ -687,59 +695,70 @@ func createMultiVersionSupportCardEmbed(supportCards []uma.SupportCard) *discord
 	return embed
 }
 
+// SyncCommand syncs all data from API to database
+func SyncCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Sync command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
+	// Send initial message
+	msg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Starting data sync from API to database...\n\nThis may take a few minutes.")
+
+	// Create sync service
+	syncService := service.NewSyncService(umaService)
+
+	// Sync characters first
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "🔄 Syncing characters from API...")
+	if err := syncService.SyncAllCharacters(); err != nil {
+		s.ChannelMessageEdit(m.ChannelID, msg.ID, fmt.Sprintf("❌ Failed to sync characters: %v", err))
+		return
+	}
+
+	// Sync support cards
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "🔄 Syncing support cards from API...")
+	if err := syncService.SyncAllSupportCards(); err != nil {
+		s.ChannelMessageEdit(m.ChannelID, msg.ID, fmt.Sprintf("❌ Failed to sync support cards: %v", err))
+		return
+	}
+
+	// Success message
+	s.ChannelMessageEdit(m.ChannelID, msg.ID, "✅ Data sync completed successfully!\n\nAll characters and support cards have been cached in the database.\n\nFuture searches will be much faster! 🚀")
+}
+
 // CacheStatsCommand shows cache statistics
-func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	if umaDB == nil {
-		s.ChannelMessageSend(m.ChannelID, "❌ Cache database is not available.")
-		return
-	}
+func CacheStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string, logger logging.Logger) {
+	logger.Info("Cache stats command executed", map[string]interface{}{
+		"user_id":  m.Author.ID,
+		"guild_id": m.GuildID,
+	})
+	// Get character count
+	var characterCount int64
+	umaDB.Model(&models.Character{}).Count(&characterCount)
 
-	stats, err := umaDB.GetCacheStats()
-	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to get cache statistics: %v", err))
-		return
-	}
+	// Get support card count
+	var supportCardCount int64
+	umaDB.Model(&models.SupportCard{}).Count(&supportCardCount)
 
-	// Create embed with cache statistics
+	// Create embed
 	embed := &discordgo.MessageEmbed{
-		Title:       "📊 UMA Cache Statistics",
-		Description: "Current cache statistics for UMA data",
-		Color:       0x00ff00, // Green color
+		Title:       "📊 Database Cache Statistics",
+		Description: "Current data cached in the database",
+		Color:       0x00ff00, // Green
 		Timestamp:   time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hokko Tarumae | UMA Cache Statistics",
-		},
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name:   "🔍 Character Searches",
-				Value:  fmt.Sprintf("%d", stats["character_search"]),
+				Name:   "👥 Characters",
+				Value:  fmt.Sprintf("%d characters cached", characterCount),
 				Inline: true,
 			},
 			{
-				Name:   "🖼️ Character Images",
-				Value:  fmt.Sprintf("%d", stats["character_images"]),
+				Name:   "🎴 Support Cards",
+				Value:  fmt.Sprintf("%d support cards cached", supportCardCount),
 				Inline: true,
 			},
-			{
-				Name:   "🎴 Support Card Searches",
-				Value:  fmt.Sprintf("%d", stats["support_card_search"]),
-				Inline: true,
-			},
-			{
-				Name:   "📋 Support Card Lists",
-				Value:  fmt.Sprintf("%d", stats["support_card_list"]),
-				Inline: true,
-			},
-			{
-				Name:   "⚡ Gametora Skills",
-				Value:  fmt.Sprintf("%d", stats["gametora_skills"]),
-				Inline: true,
-			},
-			{
-				Name:   "🗄️ Total Cache Entries",
-				Value:  fmt.Sprintf("%d", stats["total_cache"]),
-				Inline: true,
-			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Use !uma sync to refresh all data",
 		},
 	}
 

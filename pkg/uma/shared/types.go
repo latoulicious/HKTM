@@ -1,4 +1,4 @@
-package uma
+package shared
 
 import "time"
 
@@ -24,6 +24,13 @@ type CharacterSearchResult struct {
 	Character *Character
 	Error     error
 	Query     string
+}
+
+// CharacterListResult represents the result of fetching all characters
+type CharacterListResult struct {
+	Found      bool
+	Characters []Character
+	Error      error
 }
 
 // APIResponse represents the response from umapyoi.net API

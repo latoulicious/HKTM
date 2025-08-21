@@ -6,12 +6,13 @@ import (
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/latoulicious/HKTM/pkg/uma"
+	"github.com/latoulicious/HKTM/pkg/uma/handler"
+	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 // SupportCardNavigationState tracks the current state of support card version navigation
 type SupportCardNavigationState struct {
-	SupportCards []*uma.SimplifiedSupportCard
+	SupportCards []*shared.SimplifiedSupportCard
 	CurrentIndex int
 	MessageID    string
 	ChannelID    string
@@ -109,7 +110,7 @@ func (scnm *SupportCardNavigationManager) HandleSupportCardReaction(s *discordgo
 		}
 	case "🔄":
 		// Refresh (re-search)
-		client := uma.GetGametoraClient()
+		client := handler.GetGametoraClient()
 		if client != nil {
 			result := client.SearchSimplifiedSupportCard(state.Query)
 			if result.Found && len(result.SupportCards) > 0 {
@@ -134,7 +135,7 @@ func (scnm *SupportCardNavigationManager) HandleSupportCardReaction(s *discordgo
 }
 
 // RegisterSupportCardNavigation registers a new support card version navigation
-func (scnm *SupportCardNavigationManager) RegisterSupportCardNavigation(messageID string, supportCards []*uma.SimplifiedSupportCard, channelID string, query string) {
+func (scnm *SupportCardNavigationManager) RegisterSupportCardNavigation(messageID string, supportCards []*shared.SimplifiedSupportCard, channelID string, query string) {
 	scnm.mutex.Lock()
 	defer scnm.mutex.Unlock()
 
@@ -156,12 +157,12 @@ func (scnm *SupportCardNavigationManager) CleanupSupportCardNavigation(messageID
 }
 
 // CreateSupportCardEmbed creates an embed for support card display with version navigation
-func (scnm *SupportCardNavigationManager) CreateSupportCardEmbed(supportCard *uma.SimplifiedSupportCard, allCards []*uma.SimplifiedSupportCard, currentIndex int) *discordgo.MessageEmbed {
+func (scnm *SupportCardNavigationManager) CreateSupportCardEmbed(supportCard *shared.SimplifiedSupportCard, allCards []*shared.SimplifiedSupportCard, currentIndex int) *discordgo.MessageEmbed {
 	return scnm.createSupportCardEmbed(supportCard, allCards, currentIndex)
 }
 
 // createSupportCardEmbed creates an embed for support card display with version navigation
-func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *uma.SimplifiedSupportCard, allCards []*uma.SimplifiedSupportCard, currentIndex int) *discordgo.MessageEmbed {
+func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *shared.SimplifiedSupportCard, allCards []*shared.SimplifiedSupportCard, currentIndex int) *discordgo.MessageEmbed {
 	// Determine embed color based on rarity
 	var color int
 	switch supportCard.Rarity {
@@ -178,7 +179,7 @@ func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *um
 	// Build footer text
 	footerText := "Data from Gametora API"
 	if len(allCards) > 1 {
-		footerText = fmt.Sprintf("Data from Gametora API | %s Version (%d of %d)", uma.GetRarityText(supportCard.Rarity), currentIndex+1, len(allCards))
+		footerText = fmt.Sprintf("Data from Gametora API | %s Version (%d of %d)", shared.GetRarityText(supportCard.Rarity), currentIndex+1, len(allCards))
 	}
 
 	// Create embed
@@ -192,7 +193,7 @@ func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *um
 		Fields: []*discordgo.MessageEmbedField{
 			{
 				Name:   "🎴 Rarity",
-				Value:  uma.GetRarityText(supportCard.Rarity),
+				Value:  shared.GetRarityText(supportCard.Rarity),
 				Inline: true,
 			},
 			{
@@ -219,7 +220,7 @@ func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *um
 
 	// Add card image if available
 	if supportCard.URLName != "" {
-		client := uma.GetGametoraClient()
+		client := handler.GetGametoraClient()
 		if client != nil {
 			imageURL := client.GetSupportCardImageURL(supportCard.URLName)
 			if imageURL != "" {
@@ -273,7 +274,7 @@ func (scnm *SupportCardNavigationManager) createSupportCardEmbed(supportCard *um
 				indicator = "●"
 			}
 
-			versionsText.WriteString(fmt.Sprintf("%s %s (%s) - ID: %d", indicator, card.NameJp, uma.GetRarityText(card.Rarity), card.SupportID))
+			versionsText.WriteString(fmt.Sprintf("%s %s (%s) - ID: %d", indicator, card.NameJp, shared.GetRarityText(card.Rarity), card.SupportID))
 			if i < len(allCards)-1 {
 				versionsText.WriteString("\n")
 			}

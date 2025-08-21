@@ -1,0 +1,67 @@
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]  # triggers on SemVer tags like v1.2.3
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # required for tags and changelog ranges
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          check-latest: true
+          cache: true
+
+      - name: Show tag/context
+        run: |
+          echo "TAG:           $GITHUB_REF_NAME"
+          echo "SHORT_SHA:     ${GITHUB_SHA::7}"
+          echo "BUILD_TIME:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git describe --tags --abbrev=0 --match 'v[0-9]*' --always || true
+
+      # Optional: generate/append changelog using your script if present
+      - name: Generate changelog (optional)
+        id: changelog
+        run: |
+          if [[ -x scripts/changelog.sh ]]; then
+            PREV="$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1 --skip=1)" 2>/dev/null || true)"
+            echo "prev=$PREV"
+            ./scripts/changelog.sh "$GITHUB_REF_NAME" "$PREV" "$GITHUB_REF_NAME"
+            echo "path=CHANGELOG.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build all targets (via Makefile)
+        run: |
+          make clean
+          make build-all
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hktm-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: ${{ steps.changelog.outputs.path }}
+          files: |
+            dist/*

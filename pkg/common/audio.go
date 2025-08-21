@@ -69,11 +69,43 @@ func (ap *AudioPipeline) PlayStream(streamURL string) error {
 
 	ap.isPlaying = true
 
-	// Start health monitoring
-	ap.startHealthMonitoring()
-
 	// Start the main streaming goroutine
 	go ap.streamLoop(streamURL)
+
+	// Start health monitoring in a separate goroutine
+	go ap.startHealthMonitoring()
+
+	// Start error handler
+	go ap.errorHandler(streamURL)
+
+	return nil
+}
+
+// PlayStreamWithOriginalURL starts streaming with URL refresh capability
+// This is useful for YouTube URLs that may expire
+func (ap *AudioPipeline) PlayStreamWithOriginalURL(streamURL, originalURL string) error {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+
+	if ap.isPlaying {
+		return fmt.Errorf("pipeline is already playing")
+	}
+
+	// Initialize Opus encoder
+	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
+	if err != nil {
+		return fmt.Errorf("failed to create opus encoder: %v", err)
+	}
+	encoder.SetBitrate(128000) // Higher bitrate for better quality
+	ap.opusEncoder = encoder
+
+	ap.isPlaying = true
+
+	// Start the main streaming goroutine with URL refresh capability
+	go ap.streamLoopWithURLRefresh(streamURL, originalURL)
+
+	// Start health monitoring in a separate goroutine
+	go ap.startHealthMonitoring()
 
 	// Start error handler
 	go ap.errorHandler(streamURL)
@@ -114,6 +146,19 @@ func (ap *AudioPipeline) streamLoop(streamURL string) {
 		err := ap.streamAudio(streamURL)
 		if err != nil {
 			log.Printf("Stream error: %v", err)
+
+			// Check if this is a normal completion error or network timeout
+			errStr := err.Error()
+			if strings.Contains(errStr, "stream ended normally") ||
+				strings.Contains(errStr, "ffmpeg process exited") ||
+				strings.Contains(errStr, "connection timed out") ||
+				strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "invalid stream url") ||
+				strings.Contains(errStr, "ffmpeg failed to start") {
+				log.Println("Stream ended due to normal completion or network issue, not treating as error")
+				return
+			}
+
 			ap.errorChan <- err
 
 			// Check if we should restart
@@ -143,12 +188,15 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
+		"-timeout", "30", // Add timeout for initial connection
+		"-rw_timeout", "30000000", // 30 second read/write timeout
 		"-i", streamURL,
 		"-f", "s16le",
 		"-acodec", "pcm_s16le",
 		"-ar", "48000",
 		"-ac", "2",
 		"-bufsize", "64k",
+		"-max_muxing_queue_size", "1024", // Increase queue size
 		"-")
 
 	ap.ffmpegCmd = cmd
@@ -174,12 +222,29 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 		return fmt.Errorf("failed to start ffmpeg: %v", err)
 	}
 
+	// Wait a moment for FFmpeg to start and check if it's still running
+	time.Sleep(1 * time.Second)
+	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		exitCode := cmd.ProcessState.ExitCode()
+		if exitCode == 1 {
+			return fmt.Errorf("ffmpeg failed to start - likely invalid stream URL or network issue")
+		}
+		return fmt.Errorf("ffmpeg process exited immediately after start with code %d", exitCode)
+	}
+
 	// Ensure process cleanup
 	defer func() {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
 		cmd.Wait()
+
+		// Check exit status for network-related errors
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			if cmd.ProcessState.ExitCode() != 0 {
+				log.Printf("FFmpeg exited with code %d", cmd.ProcessState.ExitCode())
+			}
+		}
 	}()
 
 	// Wait for voice connection readiness
@@ -190,6 +255,9 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 	// Start speaking
 	ap.voiceConn.Speaking(true)
 	defer ap.voiceConn.Speaking(false)
+
+	// Initialize frame time to now to prevent premature health check failures
+	ap.lastFrameTime = time.Now()
 
 	log.Println("Starting audio stream to Discord...")
 
@@ -233,8 +301,22 @@ func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
 				log.Println("FFmpeg stream ended normally")
 				return nil
 			}
+			// Check if FFmpeg process has exited
+			if ap.ffmpegCmd != nil && ap.ffmpegCmd.Process != nil {
+				if ap.ffmpegCmd.ProcessState != nil && ap.ffmpegCmd.ProcessState.Exited() {
+					log.Println("FFmpeg process exited, stream ended")
+					return nil
+				}
+			}
 			return fmt.Errorf("error reading PCM data: %v", err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(10 * time.Second): // Increased timeout
+			// Check if FFmpeg process is still running
+			if ap.ffmpegCmd != nil && ap.ffmpegCmd.Process != nil {
+				if ap.ffmpegCmd.ProcessState != nil && ap.ffmpegCmd.ProcessState.Exited() {
+					log.Println("FFmpeg process exited during timeout")
+					return nil
+				}
+			}
 			return fmt.Errorf("timeout reading PCM data")
 		}
 
@@ -317,6 +399,26 @@ func (ap *AudioPipeline) shouldRestart(err error) bool {
 		"error reading PCM data",
 	}
 
+	// Don't restart for certain errors that indicate normal completion or network issues
+	nonRecoverableErrors := []string{
+		"ffmpeg stream ended normally",
+		"ffmpeg process exited",
+		"stream completed normally",
+		"connection timed out",
+		"connection refused",
+		"network is unreachable",
+		"no route to host",
+		"temporary failure in name resolution",
+		"invalid stream url",
+		"ffmpeg failed to start",
+	}
+
+	for _, nonRecoverable := range nonRecoverableErrors {
+		if contains(errStr, nonRecoverable) {
+			return false
+		}
+	}
+
 	for _, recoverable := range recoverableErrors {
 		if contains(errStr, recoverable) {
 			return true
@@ -348,12 +450,25 @@ func (ap *AudioPipeline) consumeStderr(stderr io.ReadCloser) {
 	defer stderr.Close()
 	buffer := make([]byte, 1024)
 	for {
-		_, err := stderr.Read(buffer)
+		n, err := stderr.Read(buffer)
 		if err != nil {
 			return
 		}
-		// Optionally log FFmpeg stderr for debugging
-		// log.Printf("FFmpeg: %s", string(buffer))
+		if n > 0 {
+			// Log FFmpeg stderr for debugging, but only if it contains errors
+			output := string(buffer[:n])
+			if strings.Contains(strings.ToLower(output), "error") ||
+				strings.Contains(strings.ToLower(output), "failed") ||
+				strings.Contains(strings.ToLower(output), "timeout") {
+				log.Printf("FFmpeg stderr: %s", output)
+
+				// If we detect a network timeout, mark it as a network issue
+				if strings.Contains(strings.ToLower(output), "connection timed out") ||
+					strings.Contains(strings.ToLower(output), "connection refused") {
+					log.Println("Detected network timeout in FFmpeg output")
+				}
+			}
+		}
 	}
 }
 
@@ -398,6 +513,17 @@ func contains(s, substr string) bool {
 
 // startHealthMonitoring starts health monitoring for the audio pipeline
 func (ap *AudioPipeline) startHealthMonitoring() {
+	// Start health monitoring after a delay to allow stream to establish
+	time.Sleep(3 * time.Second)
+
+	// Check if we're still playing before starting health monitoring
+	ap.mu.RLock()
+	if !ap.isPlaying {
+		ap.mu.RUnlock()
+		return
+	}
+	ap.mu.RUnlock()
+
 	ap.healthTicker = time.NewTicker(5 * time.Second)
 	go func() {
 		defer func() {
@@ -410,6 +536,13 @@ func (ap *AudioPipeline) startHealthMonitoring() {
 			case <-ap.ctx.Done():
 				return
 			case <-ap.healthTicker.C:
+				// Check if we're still playing before running health check
+				ap.mu.RLock()
+				if !ap.isPlaying {
+					ap.mu.RUnlock()
+					return
+				}
+				ap.mu.RUnlock()
 				ap.checkHealth()
 			}
 		}
@@ -426,14 +559,110 @@ func (ap *AudioPipeline) checkHealth() {
 	}
 
 	// Check if we haven't received frames in a while
-	if time.Since(ap.lastFrameTime) > 10*time.Second {
-		log.Println("Health check failed: no frames received in 10 seconds")
-		ap.errorChan <- fmt.Errorf("stream health check failed: no recent frames")
+	// Only trigger health check if we've been playing for more than 5 seconds
+	// and haven't received frames in the last 15 seconds
+	if time.Since(ap.lastFrameTime) > 15*time.Second {
+		// Additional check: only trigger if FFmpeg process is still running
+		if ap.ffmpegCmd != nil && ap.ffmpegCmd.Process != nil {
+			// Check if process is still alive
+			if ap.ffmpegCmd.ProcessState != nil && ap.ffmpegCmd.ProcessState.Exited() {
+				log.Println("Health check: FFmpeg process has exited")
+				return
+			}
+		}
+
+		// Check if we've been playing for at least 20 seconds before triggering health check
+		// This prevents premature health check failures during network issues
+		if time.Since(ap.lastFrameTime) > 20*time.Second {
+			log.Println("Health check failed: no frames received in 20 seconds")
+			ap.errorChan <- fmt.Errorf("stream health check failed: no recent frames")
+		}
 	}
 
 	// Check voice connection state
 	if ap.voiceConn == nil || !ap.voiceConn.Ready {
 		log.Println("Health check failed: voice connection not ready")
 		ap.errorChan <- fmt.Errorf("voice connection health check failed")
+	}
+}
+
+// streamLoopWithURLRefresh is the main audio streaming loop with URL refresh capability
+func (ap *AudioPipeline) streamLoopWithURLRefresh(streamURL, originalURL string) {
+	defer func() {
+		ap.mu.Lock()
+		ap.isPlaying = false
+		ap.mu.Unlock()
+	}()
+
+	// Add a restart mutex to prevent multiple simultaneous restarts
+	var restartMutex sync.Mutex
+
+	for {
+		select {
+		case <-ap.ctx.Done():
+			log.Println("Audio pipeline context cancelled")
+			return
+		case <-ap.restartChan:
+			restartMutex.Lock()
+			if ap.restartCount >= ap.maxRestarts {
+				log.Printf("Max restart attempts (%d) reached, stopping", ap.maxRestarts)
+				ap.errorChan <- fmt.Errorf("max restarts exceeded")
+				restartMutex.Unlock()
+				return
+			}
+			ap.restartCount++
+			log.Printf("Restarting audio pipeline (attempt %d/%d)", ap.restartCount, ap.maxRestarts)
+			time.Sleep(2 * time.Second) // Brief delay before restart
+			restartMutex.Unlock()
+		}
+
+		// Try to get a fresh URL if we have an original URL (YouTube)
+		currentURL := streamURL
+		if originalURL != "" {
+			log.Println("Getting fresh stream URL to avoid expiration...")
+			freshURL, err := GetFreshYouTubeStreamURL(originalURL)
+			if err != nil {
+				log.Printf("Failed to get fresh URL, using original: %v", err)
+			} else {
+				currentURL = freshURL
+				log.Println("Successfully got fresh stream URL")
+			}
+		}
+
+		err := ap.streamAudio(currentURL)
+		if err != nil {
+			log.Printf("Stream error: %v", err)
+
+			// Check if this is a normal completion error or network timeout
+			errStr := err.Error()
+			if strings.Contains(errStr, "stream ended normally") ||
+				strings.Contains(errStr, "ffmpeg process exited") ||
+				strings.Contains(errStr, "connection timed out") ||
+				strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "invalid stream url") ||
+				strings.Contains(errStr, "ffmpeg failed to start") {
+				log.Println("Stream ended due to normal completion or network issue, not treating as error")
+				return
+			}
+
+			ap.errorChan <- err
+
+			// Check if we should restart
+			if ap.shouldRestart(err) {
+				restartMutex.Lock()
+				select {
+				case ap.restartChan <- struct{}{}:
+				default:
+					// If channel is full, don't send another restart signal
+				}
+				restartMutex.Unlock()
+				continue
+			}
+			return
+		}
+
+		// Normal completion
+		log.Println("Audio stream completed normally")
+		return
 	}
 }
