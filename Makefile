@@ -53,7 +53,6 @@ dev:
 # Cross-compilation (common triples). Extend if you need more.
 build-all:
 	set -euo pipefail; \
-	export CGO_ENABLED=0; \
 	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"; \
 	mkdir -p dist; \
 	for GOOS in linux darwin windows; do \
@@ -61,6 +60,7 @@ build-all:
 	    OUT="dist/$(BIN_NAME)_$${GOOS}_$${GOARCH}"; \
 	    [[ "$${GOOS}" == "windows" ]] && OUT="$${OUT}.exe"; \
 	    echo "  → $${OUT}"; \
+	    if [[ "$${GOOS}" == "linux" ]]; then export CGO_ENABLED=1; else export CGO_ENABLED=0; fi; \
 	    GOOS=$${GOOS} GOARCH=$${GOARCH} go build -ldflags="$(LDFLAGS)" -o "$${OUT}" $(ENTRY); \
 	  done; \
 	done
