@@ -258,15 +258,38 @@ func ValidateYtDlpBinary(binaryPath string) error {
 
 // ValidateAllBinaryDependencies validates all required binary dependencies
 // Used by Factory for comprehensive dependency validation
-func ValidateAllBinaryDependencies(ffmpegPath, ytDlpPath string) error {
-	// Validate FFmpeg
-	if err := ValidateFFmpegBinary(ffmpegPath); err != nil {
+func ValidateAllBinaryDependencies(binaryPaths ...string) error {
+	if len(binaryPaths) < 2 {
+		return fmt.Errorf("at least ffmpeg and yt-dlp paths must be provided")
+	}
+
+	// Validate FFmpeg (first parameter)
+	if err := ValidateFFmpegBinary(binaryPaths[0]); err != nil {
 		return fmt.Errorf("FFmpeg validation failed: %w", err)
 	}
 
-	// Validate yt-dlp
-	if err := ValidateYtDlpBinary(ytDlpPath); err != nil {
+	// Validate yt-dlp (second parameter)
+	if err := ValidateYtDlpBinary(binaryPaths[1]); err != nil {
 		return fmt.Errorf("yt-dlp validation failed: %w", err)
+	}
+
+	// Validate additional streaming binaries if provided
+	if len(binaryPaths) > 2 {
+		// Streaming yt-dlp path (third parameter)
+		if binaryPaths[2] != "" && binaryPaths[2] != binaryPaths[1] {
+			if err := ValidateYtDlpBinary(binaryPaths[2]); err != nil {
+				return fmt.Errorf("streaming yt-dlp validation failed: %w", err)
+			}
+		}
+	}
+
+	if len(binaryPaths) > 3 {
+		// Streaming ffmpeg path (fourth parameter)
+		if binaryPaths[3] != "" && binaryPaths[3] != binaryPaths[0] {
+			if err := ValidateFFmpegBinary(binaryPaths[3]); err != nil {
+				return fmt.Errorf("streaming FFmpeg validation failed: %w", err)
+			}
+		}
 	}
 
 	return nil

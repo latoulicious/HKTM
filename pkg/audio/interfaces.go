@@ -92,6 +92,7 @@ type ConfigProvider interface {
 	GetFFmpegConfig() *FFmpegConfig
 	GetYtDlpConfig() *YtDlpConfig
 	GetOpusConfig() *OpusConfig
+	GetStreamingConfig() *StreamingConfig
 	GetRetryConfig() *RetryConfig
 	GetLoggerConfig() *LoggerConfig
 	Validate() error

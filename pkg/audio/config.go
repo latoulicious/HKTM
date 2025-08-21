@@ -43,6 +43,20 @@ type OpusConfig struct {
 	FrameSize int `yaml:"frame_size" toml:"frame_size" env:"AUDIO_OPUS_FRAME_SIZE"`
 }
 
+// StreamingConfig contains streaming pipeline configuration
+type StreamingConfig struct {
+	YtdlpPath        string        `yaml:"ytdlp_path" toml:"ytdlp_path" env:"AUDIO_STREAMING_YTDLP_PATH"`
+	FFmpegPath       string        `yaml:"ffmpeg_path" toml:"ffmpeg_path" env:"AUDIO_STREAMING_FFMPEG_PATH"`
+	SampleRate       int           `yaml:"sample_rate" toml:"sample_rate" env:"AUDIO_STREAMING_SAMPLE_RATE"`
+	Channels         int           `yaml:"channels" toml:"channels" env:"AUDIO_STREAMING_CHANNELS"`
+	Bitrate          int           `yaml:"bitrate" toml:"bitrate" env:"AUDIO_STREAMING_BITRATE"`
+	BufferSize       int           `yaml:"buffer_size" toml:"buffer_size" env:"AUDIO_STREAMING_BUFFER_SIZE"`
+	URLRefreshBuffer time.Duration `yaml:"url_refresh_buffer" toml:"url_refresh_buffer" env:"AUDIO_STREAMING_URL_REFRESH_BUFFER"`
+	URLRetryDelay    time.Duration `yaml:"url_retry_delay" toml:"url_retry_delay" env:"AUDIO_STREAMING_URL_RETRY_DELAY"`
+	StartTimeout     time.Duration `yaml:"start_timeout" toml:"start_timeout" env:"AUDIO_STREAMING_START_TIMEOUT"`
+	ProcessTimeout   time.Duration `yaml:"process_timeout" toml:"process_timeout" env:"AUDIO_STREAMING_PROCESS_TIMEOUT"`
+}
+
 // RetryConfig contains retry logic configuration
 type RetryConfig struct {
 	MaxRetries int           `yaml:"max_retries" toml:"max_retries" env:"AUDIO_MAX_RETRIES"`
@@ -85,22 +99,24 @@ type ErrorStats struct {
 
 // ConfigManager implements the ConfigProvider interface
 type ConfigManager struct {
-	pipeline *PipelineConfig
-	ffmpeg   *FFmpegConfig
-	ytdlp    *YtDlpConfig
-	opus     *OpusConfig
-	retry    *RetryConfig
-	logger   *LoggerConfig
+	pipeline  *PipelineConfig
+	ffmpeg    *FFmpegConfig
+	ytdlp     *YtDlpConfig
+	opus      *OpusConfig
+	streaming *StreamingConfig
+	retry     *RetryConfig
+	logger    *LoggerConfig
 }
 
 // AudioConfig represents the complete configuration structure for YAML/TOML files
 type AudioConfig struct {
-	Pipeline PipelineConfig `yaml:"pipeline" toml:"pipeline"`
-	FFmpeg   FFmpegConfig   `yaml:"ffmpeg" toml:"ffmpeg"`
-	YtDlp    YtDlpConfig    `yaml:"ytdlp" toml:"ytdlp"`
-	Opus     OpusConfig     `yaml:"opus" toml:"opus"`
-	Retry    RetryConfig    `yaml:"retry" toml:"retry"`
-	Logger   LoggerConfig   `yaml:"logger" toml:"logger"`
+	Pipeline  PipelineConfig  `yaml:"pipeline" toml:"pipeline"`
+	FFmpeg    FFmpegConfig    `yaml:"ffmpeg" toml:"ffmpeg"`
+	YtDlp     YtDlpConfig     `yaml:"ytdlp" toml:"ytdlp"`
+	Opus      OpusConfig      `yaml:"opus" toml:"opus"`
+	Streaming StreamingConfig `yaml:"streaming" toml:"streaming"`
+	Retry     RetryConfig     `yaml:"retry" toml:"retry"`
+	Logger    LoggerConfig    `yaml:"logger" toml:"logger"`
 }
 
 // NewConfigManager creates a new ConfigManager with configuration loaded from multiple sources
@@ -132,6 +148,7 @@ func NewConfigManager() (ConfigProvider, error) {
 	manager.ffmpeg = &config.FFmpeg
 	manager.ytdlp = &config.YtDlp
 	manager.opus = &config.Opus
+	manager.streaming = &config.Streaming
 	manager.retry = &config.Retry
 	manager.logger = &config.Logger
 
@@ -214,6 +231,20 @@ func (cm *ConfigManager) loadEnvConfig(config *AudioConfig) error {
 		FrameSize: getEnvInt("AUDIO_OPUS_FRAME_SIZE", 960),
 	}
 
+	// Load streaming config from environment
+	config.Streaming = StreamingConfig{
+		YtdlpPath:        getEnvString("AUDIO_STREAMING_YTDLP_PATH", "yt-dlp"),
+		FFmpegPath:       getEnvString("AUDIO_STREAMING_FFMPEG_PATH", "ffmpeg"),
+		SampleRate:       getEnvInt("AUDIO_STREAMING_SAMPLE_RATE", 48000),
+		Channels:         getEnvInt("AUDIO_STREAMING_CHANNELS", 2),
+		Bitrate:          getEnvInt("AUDIO_STREAMING_BITRATE", 128000),
+		BufferSize:       getEnvInt("AUDIO_STREAMING_BUFFER_SIZE", 3840),
+		URLRefreshBuffer: getEnvDuration("AUDIO_STREAMING_URL_REFRESH_BUFFER", 1*time.Minute),
+		URLRetryDelay:    getEnvDuration("AUDIO_STREAMING_URL_RETRY_DELAY", 30*time.Second),
+		StartTimeout:     getEnvDuration("AUDIO_STREAMING_START_TIMEOUT", 30*time.Second),
+		ProcessTimeout:   getEnvDuration("AUDIO_STREAMING_PROCESS_TIMEOUT", 5*time.Minute),
+	}
+
 	// Load retry config from environment
 	config.Retry = RetryConfig{
 		MaxRetries: getEnvInt("AUDIO_MAX_RETRIES", 3),
@@ -259,6 +290,19 @@ func (cm *ConfigManager) setDefaults(config *AudioConfig) {
 		FrameSize: 960,
 	}
 
+	config.Streaming = StreamingConfig{
+		YtdlpPath:        "yt-dlp",
+		FFmpegPath:       "ffmpeg",
+		SampleRate:       48000,
+		Channels:         2,
+		Bitrate:          128000,
+		BufferSize:       3840,
+		URLRefreshBuffer: 1 * time.Minute,
+		URLRetryDelay:    30 * time.Second,
+		StartTimeout:     30 * time.Second,
+		ProcessTimeout:   5 * time.Minute,
+	}
+
 	config.Retry = RetryConfig{
 		MaxRetries: 3,
 		BaseDelay:  2 * time.Second,
@@ -291,6 +335,11 @@ func (cm *ConfigManager) GetYtDlpConfig() *YtDlpConfig {
 // GetOpusConfig returns the Opus configuration
 func (cm *ConfigManager) GetOpusConfig() *OpusConfig {
 	return cm.opus
+}
+
+// GetStreamingConfig returns the streaming configuration
+func (cm *ConfigManager) GetStreamingConfig() *StreamingConfig {
+	return cm.streaming
 }
 
 // GetRetryConfig returns the retry configuration
@@ -343,6 +392,38 @@ func (cm *ConfigManager) Validate() error {
 		return fmt.Errorf("opus frame_size must be positive, got %d", cm.opus.FrameSize)
 	}
 
+	// Validate streaming config
+	if cm.streaming.YtdlpPath == "" {
+		return fmt.Errorf("streaming ytdlp_path cannot be empty")
+	}
+	if cm.streaming.FFmpegPath == "" {
+		return fmt.Errorf("streaming ffmpeg_path cannot be empty")
+	}
+	if cm.streaming.SampleRate <= 0 {
+		return fmt.Errorf("streaming sample_rate must be positive, got %d", cm.streaming.SampleRate)
+	}
+	if cm.streaming.Channels <= 0 {
+		return fmt.Errorf("streaming channels must be positive, got %d", cm.streaming.Channels)
+	}
+	if cm.streaming.Bitrate <= 0 {
+		return fmt.Errorf("streaming bitrate must be positive, got %d", cm.streaming.Bitrate)
+	}
+	if cm.streaming.BufferSize <= 0 {
+		return fmt.Errorf("streaming buffer_size must be positive, got %d", cm.streaming.BufferSize)
+	}
+	if cm.streaming.URLRefreshBuffer <= 0 {
+		return fmt.Errorf("streaming url_refresh_buffer must be positive, got %v", cm.streaming.URLRefreshBuffer)
+	}
+	if cm.streaming.URLRetryDelay <= 0 {
+		return fmt.Errorf("streaming url_retry_delay must be positive, got %v", cm.streaming.URLRetryDelay)
+	}
+	if cm.streaming.StartTimeout <= 0 {
+		return fmt.Errorf("streaming start_timeout must be positive, got %v", cm.streaming.StartTimeout)
+	}
+	if cm.streaming.ProcessTimeout <= 0 {
+		return fmt.Errorf("streaming process_timeout must be positive, got %v", cm.streaming.ProcessTimeout)
+	}
+
 	// Validate retry config
 	if cm.retry.MaxRetries < 0 {
 		return fmt.Errorf("retry max_retries must be non-negative, got %d", cm.retry.MaxRetries)
@@ -371,7 +452,7 @@ func (cm *ConfigManager) Validate() error {
 // ValidateDependencies validates that all required binary dependencies are available
 func (cm *ConfigManager) ValidateDependencies() error {
 	// Validate all binary dependencies using shared utilities
-	return ValidateAllBinaryDependencies(cm.ffmpeg.BinaryPath, cm.ytdlp.BinaryPath)
+	return ValidateAllBinaryDependencies(cm.ffmpeg.BinaryPath, cm.ytdlp.BinaryPath, cm.streaming.YtdlpPath, cm.streaming.FFmpegPath)
 }
 
 // Helper functions for environment variable parsing

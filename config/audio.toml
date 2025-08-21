@@ -15,6 +15,18 @@ custom_args = ["-reconnect", "1", "-reconnect_delay_max", "5"]
 bitrate = 128000
 frame_size = 960
 
+[streaming]
+ytdlp_path = "yt-dlp"
+ffmpeg_path = "ffmpeg"
+sample_rate = 48000
+channels = 2
+bitrate = 128000
+buffer_size = 3840
+url_refresh_buffer = "1m"
+url_retry_delay = "30s"
+start_timeout = "30s"
+process_timeout = "5m"
+
 [retry]
 max_retries = 3
 base_delay = "2s"
