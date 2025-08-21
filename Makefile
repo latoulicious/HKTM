@@ -91,15 +91,15 @@ version:
 # Slash commands
 check-commands:
 	echo "🔍 Checking registered slash commands…"
-	go run tools/slash_sync.go -action check
+	go run main/slash/slash_sync.go -action check
 
 register-commands:
 	echo "📝 Registering slash commands…"
-	go run tools/slash_sync.go -action register
+	go run main/slash/slash_sync.go -action register
 
 delete-commands:
 	echo "🗑️ Deleting all slash commands…"
-	go run tools/slash_sync.go -action delete-all
+	go run main/slash_sync.go -action delete-all
 
 setup-commands: delete-commands register-commands check-commands
 	echo "✅ Slash commands setup complete!"

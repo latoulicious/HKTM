@@ -6,14 +6,13 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/latoulicious/HKTM/internal/version"
 	"github.com/latoulicious/HKTM/pkg/logging"
 )
 
 var startTime = time.Now()
 
-// AboutCommand displays bot information including version, uptime, memory usage, and Go version
 func AboutCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Initialize centralized logging for this command
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	logger := loggerFactory.CreateCommandLogger("about")
 	logger.Info("About command executed", map[string]interface{}{
@@ -22,70 +21,43 @@ func AboutCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		"guild_id":   m.GuildID,
 		"channel_id": m.ChannelID,
 	})
-	// Calculate uptime
+
 	uptime := time.Since(startTime)
 	uptimeStr := formatUptime(uptime)
 
-	// Get memory statistics
+	// memory usage
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 	memoryUsage := fmt.Sprintf("%.2f MB", float64(memStats.Alloc)/1024/1024)
 
-	// Create embed
+	// fetch build/version info
+	info := version.Get()
+	buildTime := info.BuildTime
+	if t, err := time.Parse(time.RFC3339, info.BuildTime); err == nil {
+		buildTime = t.UTC().Format("02 Jan 2006 15:04 UTC")
+	}
+	commitURL := fmt.Sprintf("https://github.com/latoulicious/HKTM/commit/%s", info.GitCommit)
+
 	embed := &discordgo.MessageEmbed{
 		Title:       "Bot Information",
 		Description: "Tomakomai's Tourism Ambassador!★",
-		Color:       0x00ff00, // Green color
+		Color:       0x00ff00,
 		Timestamp:   time.Now().Format(time.RFC3339),
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: "Created and maintained by latoulicious",
 		},
 		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Bot Name",
-				Value:  "Hokko Tarumae",
-				Inline: true,
-			},
-			{
-				Name:   "Version",
-				Value:  "v1.0.0",
-				Inline: true,
-			},
-			{
-				Name:   "Repository",
-				Value:  "[GitHub](https://github.com/latoulicious/HKTM)",
-				Inline: true,
-			},
-			{
-				Name:   "Uptime",
-				Value:  uptimeStr,
-				Inline: true,
-			},
-			{
-				Name:   "Memory Usage",
-				Value:  memoryUsage,
-				Inline: true,
-			},
-			{
-				Name:   "Goroutines",
-				Value:  fmt.Sprintf("%d", runtime.NumGoroutine()),
-				Inline: true,
-			},
-			{
-				Name:   "Go Version",
-				Value:  runtime.Version(),
-				Inline: true,
-			},
-			{
-				Name:   "Platform",
-				Value:  fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
-				Inline: true,
-			},
-			{
-				Name:   "Ping",
-				Value:  fmt.Sprintf("%dms", s.HeartbeatLatency().Milliseconds()),
-				Inline: true,
-			},
+			{Name: "Bot Name", Value: "Hokko Tarumae", Inline: true},
+			{Name: "Version", Value: code(info.Version), Inline: true},
+			{Name: "Commit", Value: fmt.Sprintf("[%s](%s)", info.ShortCommit, commitURL), Inline: true},
+			{Name: "Repository", Value: "[GitHub](https://github.com/latoulicious/HKTM)", Inline: true},
+			{Name: "Uptime", Value: uptimeStr, Inline: true},
+			{Name: "Memory Usage", Value: memoryUsage, Inline: true},
+			{Name: "Goroutines", Value: fmt.Sprintf("%d", runtime.NumGoroutine()), Inline: true},
+			{Name: "Go Version", Value: runtime.Version(), Inline: true},
+			{Name: "Platform", Value: fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH), Inline: true},
+			{Name: "Build Time", Value: buildTime, Inline: true},
+			{Name: "Ping", Value: fmt.Sprintf("%dms", s.HeartbeatLatency().Milliseconds()), Inline: true},
 		},
 		Image: &discordgo.MessageEmbedImage{
 			URL: "https://c.tenor.com/ct99YJIYdvgAAAAC/tenor.gif",

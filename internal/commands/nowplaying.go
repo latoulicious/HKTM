@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/latoulicious/HKTM/pkg/common"
@@ -36,7 +35,7 @@ func NowPlayingCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 			"guild_id": guildID,
 			"user_id":  m.Author.ID,
 		})
-		
+
 		infoEmbed := embedBuilder.Info("🎵 Now Playing", "Nothing is currently playing. Use `/play` to start playing music.")
 		s.ChannelMessageSendEmbed(m.ChannelID, infoEmbed)
 		return
@@ -46,12 +45,12 @@ func NowPlayingCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	currentItem := queue.Current()
 	if currentItem == nil || !queue.IsPlaying() {
 		logger.Info("No current item playing", map[string]interface{}{
-			"guild_id":     guildID,
-			"user_id":      m.Author.ID,
-			"has_current":  currentItem != nil,
-			"is_playing":   queue.IsPlaying(),
+			"guild_id":    guildID,
+			"user_id":     m.Author.ID,
+			"has_current": currentItem != nil,
+			"is_playing":  queue.IsPlaying(),
 		})
-		
+
 		infoEmbed := embedBuilder.Info("🎵 Now Playing", "Nothing is currently playing. Use `/play` to start playing music.")
 		s.ChannelMessageSendEmbed(m.ChannelID, infoEmbed)
 		return
@@ -90,14 +89,14 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 	}
 
 	logger.Debug("Pipeline status checked", map[string]interface{}{
-		"has_pipeline":    pipeline != nil,
-		"is_playing":      isPlaying,
-		"voice_ready":     voiceConn != nil && voiceConn.Ready,
+		"has_pipeline": pipeline != nil,
+		"is_playing":   isPlaying,
+		"voice_ready":  voiceConn != nil && voiceConn.Ready,
 	})
 
 	// Use centralized embed system for now playing
 	var nowPlayingEmbed *discordgo.MessageEmbed
-	
+
 	// Get the original URL for the embed
 	originalURL := item.OriginalURL
 	if originalURL == "" {
@@ -113,7 +112,7 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 	// Add additional fields for enhanced information
 	statusEmoji := "🔴"
 	statusText := "Stopped"
-	
+
 	if isPlaying {
 		if voiceConn != nil && voiceConn.Ready {
 			statusEmoji = "🟢"
@@ -125,7 +124,7 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 	}
 
 	// Add custom fields to the centralized embed
-	nowPlayingEmbed.Fields = append(nowPlayingEmbed.Fields, 
+	nowPlayingEmbed.Fields = append(nowPlayingEmbed.Fields,
 		&discordgo.MessageEmbedField{
 			Name:   "Requested by",
 			Value:  item.RequestedBy,
@@ -159,23 +158,4 @@ func sendNowPlayingEmbed(s *discordgo.Session, channelID string, item *common.Qu
 			"song_title": item.Title,
 		})
 	}
-}
-
-// formatDuration formats a duration into a human-readable string
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-
-	minutes := int(d.Minutes())
-	seconds := int(d.Seconds()) % 60
-
-	if d < time.Hour {
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	}
-
-	hours := minutes / 60
-	minutes = minutes % 60
-
-	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
 }

@@ -16,7 +16,7 @@ var (
 	// Global pipeline manager to track active streams
 	activePipelines = make(map[string]*common.AudioPipeline)
 	pipelineMutex   sync.RWMutex
-	
+
 	// Centralized systems for play command
 	playCommandEmbedBuilder embed.AudioEmbedBuilder
 	playCommandLogger       logging.Logger
@@ -29,44 +29,13 @@ func InitializePlayCommand() {
 	playCommandLogger = loggerFactory.CreateCommandLogger("play")
 }
 
-// sendPlayCommandEmbed is a helper function to send embed messages using centralized embeds
-// This maintains compatibility with existing code while using the new embed system
-func sendPlayCommandEmbed(s *discordgo.Session, channelID, title, description string, color int) {
-	// Initialize centralized systems if not already done
-	if playCommandEmbedBuilder == nil {
-		InitializePlayCommand()
-	}
-	
-	var embed *discordgo.MessageEmbed
-	
-	// Use centralized embed builder based on color
-	switch color {
-	case 0x00ff00: // Green - Success
-		embed = playCommandEmbedBuilder.Success(title, description)
-	case 0xff0000: // Red - Error
-		embed = playCommandEmbedBuilder.Error(title, description)
-	case 0xffa500: // Orange - Warning
-		embed = playCommandEmbedBuilder.Warning(title, description)
-	default: // Default - Info
-		embed = playCommandEmbedBuilder.Info(title, description)
-	}
-	
-	_, err := s.ChannelMessageSendEmbed(channelID, embed)
-	if err != nil && playCommandLogger != nil {
-		playCommandLogger.Error("Failed to send embed message", err, map[string]interface{}{
-			"channel_id": channelID,
-			"title":      title,
-		})
-	}
-}
-
 // PlayCommand handles the play command with queue integration
 func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	// Initialize centralized systems if not already done
 	if playCommandEmbedBuilder == nil || playCommandLogger == nil {
 		InitializePlayCommand()
 	}
-	
+
 	// Log command execution with centralized logging
 	playCommandLogger.Info("Play command executed", map[string]interface{}{
 		"user_id":    m.Author.ID,
@@ -75,12 +44,12 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 		"channel_id": m.ChannelID,
 		"args_count": len(args),
 	})
-	
+
 	if len(args) < 1 {
 		// Use centralized embed system for error messages
 		embed := playCommandEmbedBuilder.Error("❌ Usage Error", "Please provide a YouTube URL or search query.")
 		s.ChannelMessageSendEmbed(m.ChannelID, embed)
-		
+
 		playCommandLogger.Warn("Play command called without arguments", map[string]interface{}{
 			"user_id":  m.Author.ID,
 			"guild_id": m.GuildID,
@@ -106,7 +75,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 			"user_id":  m.Author.ID,
 			"guild_id": guildID,
 		})
-		
+
 		streamURL, streamTitle, streamDuration, err := common.GetYouTubeAudioStreamWithMetadata(input)
 		if err != nil {
 			playCommandLogger.Error("Error fetching stream URL", err, map[string]interface{}{
@@ -114,7 +83,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 				"user_id":  m.Author.ID,
 				"guild_id": guildID,
 			})
-			
+
 			// Use centralized embed system for error messages
 			embed := playCommandEmbedBuilder.Error("❌ Error", "Failed to get audio stream. Please check the URL.")
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
@@ -141,7 +110,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 				"user_id":      m.Author.ID,
 				"guild_id":     guildID,
 			})
-			
+
 			// Use centralized embed system for error messages
 			embed := playCommandEmbedBuilder.Error("❌ Search Error", "Failed to find any videos for your search query.")
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
@@ -157,7 +126,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 				"user_id":         m.Author.ID,
 				"guild_id":        guildID,
 			})
-			
+
 			// Use centralized embed system for error messages
 			embed := playCommandEmbedBuilder.Error("❌ Error", "Failed to get video metadata from search result.")
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
@@ -184,7 +153,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 		originalURL = videoURL
 		// Pass original YouTube URL - audio pipeline will extract stream URL just-in-time
 		queue.AddWithYouTubeData("", originalURL, videoID, title, m.Author.Username, duration)
-		
+
 		playCommandLogger.Info("Added YouTube video to queue", map[string]interface{}{
 			"title":        title,
 			"video_id":     videoID,
@@ -198,7 +167,7 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 	} else {
 		// Use the original method for non-YouTube URLs
 		queue.Add(url, title, m.Author.Username)
-		
+
 		playCommandLogger.Info("Added non-YouTube URL to queue", map[string]interface{}{
 			"title":      title,
 			"url":        url,
@@ -218,20 +187,20 @@ func PlayCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string
 	// Check if we should start playing - only if the queue can start playing
 	if queue.CanStartPlaying() {
 		playCommandLogger.Info("Starting playback", map[string]interface{}{
-			"guild_id":         guildID,
-			"queue_size":       queueSize,
-			"is_playing":       queue.IsPlaying(),
-			"has_pipeline":     queue.HasActivePipeline(),
-			"can_start":        queue.CanStartPlaying(),
+			"guild_id":     guildID,
+			"queue_size":   queueSize,
+			"is_playing":   queue.IsPlaying(),
+			"has_pipeline": queue.HasActivePipeline(),
+			"can_start":    queue.CanStartPlaying(),
 		})
 		startNextInQueue(s, m, queue)
 	} else {
 		playCommandLogger.Debug("Song added to queue but not starting playback", map[string]interface{}{
-			"guild_id":         guildID,
-			"queue_size":       queueSize,
-			"is_playing":       queue.IsPlaying(),
-			"has_pipeline":     queue.HasActivePipeline(),
-			"can_start":        queue.CanStartPlaying(),
+			"guild_id":     guildID,
+			"queue_size":   queueSize,
+			"is_playing":   queue.IsPlaying(),
+			"has_pipeline": queue.HasActivePipeline(),
+			"can_start":    queue.CanStartPlaying(),
 		})
 	}
 }
@@ -242,9 +211,9 @@ func StatusCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	if playCommandEmbedBuilder == nil || playCommandLogger == nil {
 		InitializePlayCommand()
 	}
-	
+
 	guildID := m.GuildID
-	
+
 	// Log status command execution
 	playCommandLogger.Info("Status command executed", map[string]interface{}{
 		"user_id":    m.Author.ID,
@@ -261,10 +230,10 @@ func StatusCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 		// Use centralized embed system
 		embed := playCommandEmbedBuilder.Info("🔇 No Audio", "No audio is currently playing.")
 		s.ChannelMessageSendEmbed(m.ChannelID, embed)
-		
+
 		playCommandLogger.Debug("Status check - no audio playing", map[string]interface{}{
-			"guild_id":      guildID,
-			"pipeline_exists": exists,
+			"guild_id":         guildID,
+			"pipeline_exists":  exists,
 			"pipeline_playing": exists && pipeline.IsPlaying(),
 		})
 		return
@@ -273,7 +242,7 @@ func StatusCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []stri
 	// Use centralized embed system
 	embed := playCommandEmbedBuilder.Success("🎵 Audio Playing", "Audio is currently playing.")
 	s.ChannelMessageSendEmbed(m.ChannelID, embed)
-	
+
 	playCommandLogger.Debug("Status check - audio playing", map[string]interface{}{
 		"guild_id": guildID,
 	})

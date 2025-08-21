@@ -45,19 +45,19 @@ func InitializeEnhancedTimeout(session *discordgo.Session) {
 	embedBuilder = embed.GetGlobalAudioEmbedBuilder()
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	logger = loggerFactory.CreateLogger("queue-commands")
-	
+
 	// Create timeout manager with presence manager interface
 	var pm common.PresenceManager
 	if presenceManager != nil {
 		pm = &presenceManagerAdapter{presenceManager}
 	}
-	
+
 	// Create queue getter adapter
 	queueGetter := &queueGetterAdapter{}
-	
+
 	timeoutManager = common.NewTimeoutManager(session, pm, queueGetter)
 	timeoutManager.StartMonitoring()
-	
+
 	logger.Info("Enhanced timeout system initialized", map[string]interface{}{
 		"has_presence_manager": presenceManager != nil,
 	})
@@ -86,7 +86,7 @@ func updateActivity(guildID string) {
 	if timeoutManager != nil {
 		timeoutManager.UpdateActivity(guildID)
 	}
-	
+
 	// Log activity update
 	if logger != nil {
 		logger.Debug("Updated activity for guild", map[string]interface{}{
@@ -135,7 +135,7 @@ func QueueCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 // sendEmbedMessage is a helper function to send embed messages using centralized embeds
 func sendEmbedMessage(s *discordgo.Session, channelID, title, description string, color int) {
 	var embed *discordgo.MessageEmbed
-	
+
 	// Use centralized embed builder based on color
 	switch color {
 	case 0x00ff00: // Green - Success
@@ -147,7 +147,7 @@ func sendEmbedMessage(s *discordgo.Session, channelID, title, description string
 	default: // Default - Info
 		embed = embedBuilder.Info(title, description)
 	}
-	
+
 	_, err := s.ChannelMessageSendEmbed(channelID, embed)
 	if err != nil && logger != nil {
 		logger.Error("Failed to send embed message", err, map[string]interface{}{
@@ -160,7 +160,7 @@ func sendEmbedMessage(s *discordgo.Session, channelID, title, description string
 // sendSongFinishedEmbed sends an embed when a song finishes playing using centralized embeds
 func sendSongFinishedEmbed(s *discordgo.Session, channelID, songTitle, requestedBy string) {
 	embed := embedBuilder.SongFinished(songTitle, requestedBy)
-	
+
 	_, err := s.ChannelMessageSendEmbed(channelID, embed)
 	if err != nil && logger != nil {
 		logger.Error("Failed to send song finished embed", err, map[string]interface{}{
@@ -174,39 +174,11 @@ func sendSongFinishedEmbed(s *discordgo.Session, channelID, songTitle, requested
 // sendQueueEndedEmbed sends an embed when the queue ends using centralized embeds
 func sendQueueEndedEmbed(s *discordgo.Session, channelID string) {
 	embed := embedBuilder.QueueEnded()
-	
+
 	_, err := s.ChannelMessageSendEmbed(channelID, embed)
 	if err != nil && logger != nil {
 		logger.Error("Failed to send queue ended embed", err, map[string]interface{}{
 			"channel_id": channelID,
-		})
-	}
-}
-
-// sendSongSkippedEmbed sends an embed when a song is skipped using centralized embeds
-func sendSongSkippedEmbed(s *discordgo.Session, channelID, songTitle, requestedBy, skippedBy string) {
-	embed := embedBuilder.SongSkipped(songTitle, requestedBy, skippedBy)
-	
-	_, err := s.ChannelMessageSendEmbed(channelID, embed)
-	if err != nil && logger != nil {
-		logger.Error("Failed to send song skipped embed", err, map[string]interface{}{
-			"channel_id":   channelID,
-			"song_title":   songTitle,
-			"requested_by": requestedBy,
-			"skipped_by":   skippedBy,
-		})
-	}
-}
-
-// sendBotStoppedEmbed sends an embed when the bot stops/disconnects using centralized embeds
-func sendBotStoppedEmbed(s *discordgo.Session, channelID, stoppedBy string) {
-	embed := embedBuilder.PlaybackStopped(stoppedBy)
-	
-	_, err := s.ChannelMessageSendEmbed(channelID, embed)
-	if err != nil && logger != nil {
-		logger.Error("Failed to send playback stopped embed", err, map[string]interface{}{
-			"channel_id": channelID,
-			"stopped_by": stoppedBy,
 		})
 	}
 }
@@ -227,7 +199,7 @@ func addToQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 	var originalURL string
 	var title string
 	var duration time.Duration
-	
+
 	if common.IsYouTubeURL(url) {
 		// Get metadata only (no stream URL extraction to prevent expiration)
 		metadataTitle, metadataDuration, err := common.GetYouTubeMetadata(url)
@@ -235,12 +207,12 @@ func addToQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 			sendEmbedMessage(s, m.ChannelID, "❌ Error", "Failed to get video metadata. Please check the URL.", 0xff0000)
 			return
 		}
-		
+
 		videoID = common.ExtractYouTubeVideoID(url)
 		originalURL = url
 		title = metadataTitle
 		duration = metadataDuration
-		
+
 		// Pass original YouTube URL - audio pipeline will extract stream URL just-in-time
 		queue.AddWithYouTubeData("", originalURL, videoID, title, m.Author.Username, duration)
 	} else {
@@ -254,7 +226,7 @@ func addToQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []string)
 	queueSize := queue.Size()
 	description := fmt.Sprintf("✅ Added **%s** to queue (Position: %d)", title, queueSize)
 	sendEmbedMessage(s, m.ChannelID, "🎵 Song Added", description, 0x00ff00)
-	
+
 	// Log queue operation with centralized logging
 	queue.LogQueueOperation("song_added", map[string]interface{}{
 		"title":        title,
@@ -308,7 +280,7 @@ func removeFromQueue(s *discordgo.Session, m *discordgo.MessageCreate, args []st
 	}
 
 	sendEmbedMessage(s, m.ChannelID, "✅ Success", "Removed song from queue.", 0x00ff00)
-	
+
 	// Log queue operation with centralized logging
 	queue.LogQueueOperation("song_removed", map[string]interface{}{
 		"index":      index + 1, // Convert back to 1-based for logging
@@ -334,7 +306,7 @@ func clearQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 	queueSizeBefore := queue.Size()
 	queue.Clear()
 	sendEmbedMessage(s, m.ChannelID, "✅ Success", "Queue cleared.", 0x00ff00)
-	
+
 	// Log queue operation with centralized logging
 	queue.LogQueueOperation("queue_cleared", map[string]interface{}{
 		"items_cleared": queueSizeBefore,
@@ -354,7 +326,7 @@ func showQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if queue == nil || (queue.Size() == 0 && queue.Current() == nil) {
 		sendEmbedMessage(s, m.ChannelID, "📭 Queue Empty", "No songs in the queue.", 0x808080)
-		
+
 		// Log queue status request
 		if logger != nil {
 			logger.Info("Queue status requested - empty queue", map[string]interface{}{
@@ -368,7 +340,7 @@ func showQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	// Use centralized queue status embed
 	embed := queue.GetQueueStatusEmbed()
-	
+
 	_, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
 	if err != nil && logger != nil {
 		logger.Error("Failed to send queue status embed", err, map[string]interface{}{
@@ -378,11 +350,11 @@ func showQueue(s *discordgo.Session, m *discordgo.MessageCreate) {
 	} else if logger != nil {
 		// Log successful queue status display
 		logger.Info("Queue status displayed", map[string]interface{}{
-			"guild_id":     guildID,
-			"user_id":      m.Author.ID,
-			"channel_id":   m.ChannelID,
-			"queue_size":   queue.Size(),
-			"has_current":  queue.Current() != nil,
+			"guild_id":    guildID,
+			"user_id":     m.Author.ID,
+			"channel_id":  m.ChannelID,
+			"queue_size":  queue.Size(),
+			"has_current": queue.Current() != nil,
 		})
 	}
 }
@@ -504,26 +476,7 @@ func getOrCreateQueue(guildID string) *common.MusicQueue {
 		// Fallback to basic queue if no database connection available
 		queue = common.NewMusicQueue(guildID)
 	}
-	
-	queues[guildID] = queue
-	return queue
-}
 
-// getOrCreateQueueWithDB gets or creates a queue for a guild with database connection
-func getOrCreateQueueWithDB(guildID string, db *gorm.DB) *common.MusicQueue {
-	queueMutex.Lock()
-	defer queueMutex.Unlock()
-
-	if queue, exists := queues[guildID]; exists {
-		// Update existing queue with database connection if not already set
-		if queue.GetDB() == nil {
-			queue.SetDB(db)
-		}
-		return queue
-	}
-
-	// Create new queue with database connection
-	queue := common.NewMusicQueueWithDB(guildID, db)
 	queues[guildID] = queue
 	return queue
 }
@@ -544,14 +497,14 @@ func InitializeQueueCommands(db *gorm.DB) {
 // InitializeCommandsWithDB initializes the commands package with database connection for audio pipeline support
 func InitializeCommandsWithDB(db *gorm.DB) {
 	queueDB = db
-	
+
 	// Initialize centralized systems
 	embedBuilder = embed.GetGlobalAudioEmbedBuilder()
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	logger = loggerFactory.CreateLogger("commands")
-	
+
 	logger.Info("Commands package initialized with database connection", map[string]interface{}{
-		"database_connected": true,
+		"database_connected":     true,
 		"audio_pipeline_support": true,
 	})
 }
@@ -560,25 +513,25 @@ func InitializeCommandsWithDB(db *gorm.DB) {
 func ShutdownAllAudioPipelines() {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	
+
 	loggerFactory := logging.GetGlobalLoggerFactory()
 	shutdownLogger := loggerFactory.CreateLogger("shutdown")
-	
+
 	shutdownCount := 0
 	for guildID, queue := range queues {
 		if queue != nil && queue.HasActivePipeline() {
 			shutdownLogger.Info("Shutting down audio pipeline", map[string]interface{}{
 				"guild_id": guildID,
 			})
-			
+
 			// Stop current playbook
 			queue.StopAndCleanup()
 			shutdownCount++
 		}
 	}
-	
+
 	shutdownLogger.Info("Audio pipeline shutdown complete", map[string]interface{}{
 		"pipelines_shutdown": shutdownCount,
-		"total_queues": len(queues),
+		"total_queues":       len(queues),
 	})
 }

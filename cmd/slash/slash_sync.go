@@ -1,4 +1,4 @@
-package tools
+package main
 
 import (
 	"flag"
@@ -11,7 +11,7 @@ import (
 	"github.com/latoulicious/HKTM/internal/config"
 )
 
-func SlashManager() {
+func main() {
 	// Load environment variables
 	err := godotenv.Load()
 	if err != nil {
