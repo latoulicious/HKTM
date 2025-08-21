@@ -4,21 +4,19 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := build
 
 # Binary & entry
-BIN_NAME ?= HTKM
+BIN_NAME ?= HKTM
 ENTRY    ?= cmd/main.go
 
 # Module path (used by -ldflags)
 MODULE := github.com/latoulicious/HKTM
 
-# Version info (one place)
-# Prefer annotated SemVer tags (vX.Y.Z). Fallback to dev+sha, keep dirty marker.
+# Version info
 VERSION   ?= $(shell git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo v0.0.0-dev)
 SHORT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IS_DIRTY  := $(shell git diff --quiet || echo -dirty)
 COMMIT    := $(shell git rev-parse HEAD 2>/dev/null || echo 0000000)
 BUILDTIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# If we are NOT on a tag checkout, expose dev+sha
 ON_TAG := $(shell git describe --tags --exact-match >/dev/null 2>&1 && echo yes || echo no)
 ifeq ($(ON_TAG),no)
   EFFECTIVE_VERSION := $(VERSION)+$(SHORT_SHA)$(IS_DIRTY)
@@ -26,11 +24,12 @@ else
   EFFECTIVE_VERSION := $(VERSION)
 endif
 
-# CGO (opus/ffmpeg). Keep in one place.
+# CGO (opus/ffmpeg)
 export CGO_CFLAGS := -O2 -Wno-stringop-overread -Wno-unused-parameter -Wno-format -Wno-pragma-messages
 
 # Build flags
-LDFLAGS := -s -w -trimpath \
+GO_BUILD_FLAGS := -trimpath                         # <-- moved here
+LDFLAGS := -s -w \
   -X '$(MODULE)/internal/version.Version=$(EFFECTIVE_VERSION)' \
   -X '$(MODULE)/internal/version.GitCommit=$(COMMIT)' \
   -X '$(MODULE)/internal/version.BuildTime=$(BUILDTIME)'
@@ -40,7 +39,7 @@ LDFLAGS := -s -w -trimpath \
 
 build:
 	echo "🔧 Building $(BIN_NAME) ($(EFFECTIVE_VERSION))..."
-	go build -ldflags="$(LDFLAGS)" -o $(BIN_NAME) $(ENTRY)
+	go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_NAME) $(ENTRY)
 
 run: build
 	echo "🚀 Running $(BIN_NAME)..."
@@ -48,31 +47,35 @@ run: build
 
 dev:
 	echo "⚡ go run (no binary)…"
-	go run -ldflags="$(LDFLAGS)" $(ENTRY)
+	go run $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" $(ENTRY)
 
-# Cross-compilation (common triples). Extend if you need more.
+# Cross-compilation (common triples). CGO on linux only to avoid cross C toolchains.
+GOOS_LIST   ?= linux darwin windows
+GOARCH_LIST ?= amd64 arm64
+
 build-all:
 	set -euo pipefail; \
 	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"; \
 	mkdir -p dist; \
-	for GOOS in linux darwin windows; do \
-	  for GOARCH in amd64 arm64; do \
+	for GOOS in $(GOOS_LIST); do \
+	  for GOARCH in $(GOARCH_LIST); do \
 	    OUT="dist/$(BIN_NAME)_$${GOOS}_$${GOARCH}"; \
 	    [[ "$${GOOS}" == "windows" ]] && OUT="$${OUT}.exe"; \
-	    echo "  → $${OUT}"; \
-	    if [[ "$${GOOS}" == "linux" ]]; then export CGO_ENABLED=1; else export CGO_ENABLED=0; fi; \
-	    GOOS=$${GOOS} GOARCH=$${GOARCH} go build -ldflags="$(LDFLAGS)" -o "$${OUT}" $(ENTRY); \
+	    if [[ "$${GOOS}" == "linux" ]]; then CGO_ENABLED=1; else CGO_ENABLED=0; fi; \
+	    echo "  → $${OUT} (CGO_ENABLED=$$CGO_ENABLED)"; \
+	    CGO_ENABLED=$$CGO_ENABLED GOOS=$${GOOS} GOARCH=$${GOARCH} \
+	      go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o "$${OUT}" $(ENTRY); \
 	  done; \
 	done
 
-# Human-friendly version print (same source of truth)
+# Human-friendly version print
 version:
 	echo "Version:      $(EFFECTIVE_VERSION)"
 	echo "Commit:       $(COMMIT)"
 	echo "Build Time:   $(BUILDTIME)"
-	go run -ldflags="$(LDFLAGS)" tools/version.go || true
+	go run $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" tools/version.go || true
 
-# Slash commands (fix path to your actual file)
+# Slash commands
 check-commands:
 	echo "🔍 Checking registered slash commands…"
 	go run tools/slash_sync.go -action check
@@ -95,24 +98,18 @@ clean:
 	go clean
 
 # -------- Release helpers --------
-
-# Guard that the provided tag is proper SemVer (vX.Y.Z).
 verify-tag:
 	@if [[ -z "$$tag" ]]; then echo "Usage: make tag tag=vX.Y.Z"; exit 2; fi
 	@if [[ ! "$$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
 	  echo "❌ Invalid tag: $$tag (want vX.Y.Z)"; exit 2; fi
 
-# Create and push an annotated tag (safe, validated)
 tag: verify-tag
 	git tag -a "$$tag" -m "Release $$tag"
 	git push origin "$$tag"
 	echo "🏷️  Tagged $$tag"
 
-# Optional: generate/append changelog section from last tag
-# Requires scripts/changelog.sh from earlier message.
 changelog:
 	@if [[ ! -x scripts/changelog.sh ]]; then echo "Missing scripts/changelog.sh"; exit 2; fi
-	# Detect previous and next tagish values
 	prev="$$(git describe --tags --abbrev=0 2>/dev/null || true)"; \
 	next="$(EFFECTIVE_VERSION)"; \
 	echo "📝 Updating CHANGELOG.md for range $$prev..$$next"; \
