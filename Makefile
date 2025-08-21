@@ -57,16 +57,24 @@ build-all:
 	set -euo pipefail; \
 	echo "🧱 Building matrix for $(EFFECTIVE_VERSION)…"; \
 	mkdir -p dist; \
+	host_goos="$$(go env GOOS)"; host_goarch="$$(go env GOARCH)"; \
 	for GOOS in $(GOOS_LIST); do \
 	  for GOARCH in $(GOARCH_LIST); do \
 	    OUT="dist/$(BIN_NAME)_$${GOOS}_$${GOARCH}"; \
 	    [[ "$${GOOS}" == "windows" ]] && OUT="$${OUT}.exe"; \
-	    if [[ "$${GOOS}" == "linux" ]]; then CGO_ENABLED=1; else CGO_ENABLED=0; fi; \
-	    echo "  → $${OUT} (CGO_ENABLED=$$CGO_ENABLED)"; \
-	    CGO_ENABLED=$$CGO_ENABLED GOOS=$${GOOS} GOARCH=$${GOARCH} \
+	    # CGO needed for opus/ffmpeg: enable only on linux; disable elsewhere.
+	    if [[ "$${GOOS}" == "linux" ]]; then cgo=1; else cgo=0; fi; \
+	    # If CGO=1 but tuple != host, skip (no cross C toolchain on runner).
+	    if [[ "$$cgo" == "1" && ( "$${GOOS}" != "$$host_goos" || "$${GOARCH}" != "$$host_goarch" ) ]]; then \
+	      echo "  ↷ skip $${GOOS}/$${GOARCH} (CGO cross-compile not configured)"; \
+	      continue; \
+	    fi; \
+	    echo "  → $${OUT} (CGO_ENABLED=$$cgo)"; \
+	    CGO_ENABLED=$$cgo GOOS=$${GOOS} GOARCH=$${GOARCH} \
 	      go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o "$${OUT}" $(ENTRY); \
 	  done; \
 	done
+
 
 # Human-friendly version print
 version:
