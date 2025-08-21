@@ -4,30 +4,46 @@ import (
 	"fmt"
 
 	"github.com/latoulicious/HKTM/pkg/database/models"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 type CharacterService struct {
 	service *uma.Service
+	logger  logging.Logger
 }
 
 var _ uma.CharacterServiceInterface = (*CharacterService)(nil)
 
 func NewCharacterService(s *uma.Service) uma.CharacterServiceInterface {
-	return &CharacterService{service: s}
+	return &CharacterService{
+		service: s,
+		logger:  logging.GetGlobalLoggerFactory().CreateLogger("uma_service"),
+	}
 }
 
 // SearchCharacter searches for a character by name, checking database first then API
 func (cs *CharacterService) SearchCharacter(query string) (*shared.CharacterSearchResult, error) {
-	fmt.Printf("Searching for character: %s\n", query)
+	cs.logger.Info("Starting character search", map[string]interface{}{
+		"query": query,
+		"stage": "database_lookup",
+	})
 
 	// First, try to find in database
 	dbCharacter, err := cs.service.CharacterRepo.GetCharacterByName(query)
 	if err != nil {
-		fmt.Printf("Database query error: %v\n", err)
+		cs.logger.Error("Database query error during character search", err, map[string]interface{}{
+			"query": query,
+			"stage": "database_lookup",
+		})
 	} else if dbCharacter != nil {
-		fmt.Printf("Found character in database: %s (ID: %d)\n", dbCharacter.NameEn, dbCharacter.CharacterID)
+		cs.logger.Info("Found character in database", map[string]interface{}{
+			"query":          query,
+			"character_name": dbCharacter.NameEn,
+			"character_id":   dbCharacter.CharacterID,
+			"stage":          "database_found",
+		})
 		// Convert database model to API model
 		character := cs.convertDBCharacterToShared(dbCharacter)
 
@@ -37,24 +53,48 @@ func (cs *CharacterService) SearchCharacter(query string) (*shared.CharacterSear
 			Query:     query,
 		}, nil
 	} else {
-		fmt.Printf("Character not found in database\n")
+		cs.logger.Info("Character not found in database", map[string]interface{}{
+			"query": query,
+			"stage": "database_not_found",
+		})
 	}
 
 	// If not found in database, search API
-	fmt.Printf("Searching API for character: %s\n", query)
+	cs.logger.Info("Searching API for character", map[string]interface{}{
+		"query": query,
+		"stage": "api_lookup",
+	})
 	result := cs.service.UmapyoiClient.SearchCharacter(query)
 
 	// If found in API, save to database
 	if result.Found && result.Character != nil {
-		fmt.Printf("Found character in API, saving to database: %s (ID: %d)\n", result.Character.NameEn, result.Character.ID)
+		cs.logger.Info("Found character in API, saving to database", map[string]interface{}{
+			"query":          query,
+			"character_name": result.Character.NameEn,
+			"character_id":   result.Character.ID,
+			"stage":          "api_found_saving",
+		})
 		if err := cs.saveCharacterToDatabase(result.Character); err != nil {
 			// Log error but don't fail the search
-			fmt.Printf("Failed to save character to database: %v\n", err)
+			cs.logger.Error("Failed to save character to database", err, map[string]interface{}{
+				"query":          query,
+				"character_name": result.Character.NameEn,
+				"character_id":   result.Character.ID,
+				"stage":          "database_save_failed",
+			})
 		} else {
-			fmt.Printf("Successfully saved character to database\n")
+			cs.logger.Info("Successfully saved character to database", map[string]interface{}{
+				"query":          query,
+				"character_name": result.Character.NameEn,
+				"character_id":   result.Character.ID,
+				"stage":          "database_save_success",
+			})
 		}
 	} else {
-		fmt.Printf("Character not found in API\n")
+		cs.logger.Info("Character not found in API", map[string]interface{}{
+			"query": query,
+			"stage": "api_not_found",
+		})
 	}
 
 	return result, nil
@@ -82,7 +122,11 @@ func (cs *CharacterService) GetCharacterImages(charaID int) (*shared.CharacterIm
 	if result.Found && len(result.Images) > 0 {
 		if err := cs.saveCharacterImagesToDatabase(charaID, result.Images); err != nil {
 			// Log error but don't fail the search
-			fmt.Printf("Failed to save character images to database: %v\n", err)
+			cs.logger.Error("Failed to save character images to database", err, map[string]interface{}{
+				"character_id": charaID,
+				"images_count": len(result.Images),
+				"stage":        "image_save_failed",
+			})
 		}
 	}
 

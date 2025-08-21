@@ -1,34 +1,47 @@
 package service
 
 import (
-	"fmt"
-
 	"github.com/google/uuid"
 	"github.com/latoulicious/HKTM/pkg/database/models"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
 type SupportCardService struct {
 	service *uma.Service
+	logger  logging.Logger
 }
 
 var _ uma.SupportCardServiceInterface = (*SupportCardService)(nil)
 
 func NewSupportCardService(s *uma.Service) uma.SupportCardServiceInterface {
-	return &SupportCardService{service: s}
+	return &SupportCardService{
+		service: s,
+		logger:  logging.GetGlobalLoggerFactory().CreateLogger("uma_service"),
+	}
 }
 
 // SearchSupportCard searches for a support card by name, checking database first then API
 func (scs *SupportCardService) SearchSupportCard(query string) (*shared.SupportCardSearchResult, error) {
-	fmt.Printf("Searching for support card: %s\n", query)
+	scs.logger.Info("Starting support card search", map[string]interface{}{
+		"query": query,
+		"stage": "database_lookup",
+	})
 
 	// First, try to find in database
 	dbSupportCards, err := scs.service.SupportCardRepo.GetSupportCardsByTitle(query)
 	if err != nil {
-		fmt.Printf("Database query error: %v\n", err)
+		scs.logger.Error("Database query error during support card search", err, map[string]interface{}{
+			"query": query,
+			"stage": "database_lookup",
+		})
 	} else if len(dbSupportCards) > 0 {
-		fmt.Printf("Found %d support cards in database\n", len(dbSupportCards))
+		scs.logger.Info("Found support cards in database", map[string]interface{}{
+			"query":       query,
+			"cards_count": len(dbSupportCards),
+			"stage":       "database_found",
+		})
 		// Convert database models to API models
 		supportCards := scs.convertDBSupportCardsToShared(dbSupportCards)
 
@@ -38,24 +51,45 @@ func (scs *SupportCardService) SearchSupportCard(query string) (*shared.SupportC
 			Query:        query,
 		}, nil
 	} else {
-		fmt.Printf("Support cards not found in database\n")
+		scs.logger.Info("Support cards not found in database", map[string]interface{}{
+			"query": query,
+			"stage": "database_not_found",
+		})
 	}
 
 	// If not found in database, search API
-	fmt.Printf("Searching API for support card: %s\n", query)
+	scs.logger.Info("Searching API for support card", map[string]interface{}{
+		"query": query,
+		"stage": "api_lookup",
+	})
 	result := scs.service.UmapyoiClient.SearchSupportCard(query)
 
 	// If found in API, save to database
 	if result.Found && len(result.SupportCards) > 0 {
-		fmt.Printf("Found %d support cards in API, saving to database\n", len(result.SupportCards))
+		scs.logger.Info("Found support cards in API, saving to database", map[string]interface{}{
+			"query":       query,
+			"cards_count": len(result.SupportCards),
+			"stage":       "api_found_saving",
+		})
 		if err := scs.saveSupportCardsToDatabase(result.SupportCards); err != nil {
 			// Log error but don't fail the search
-			fmt.Printf("Failed to save support cards to database: %v\n", err)
+			scs.logger.Error("Failed to save support cards to database", err, map[string]interface{}{
+				"query":       query,
+				"cards_count": len(result.SupportCards),
+				"stage":       "database_save_failed",
+			})
 		} else {
-			fmt.Printf("Successfully saved support cards to database\n")
+			scs.logger.Info("Successfully saved support cards to database", map[string]interface{}{
+				"query":       query,
+				"cards_count": len(result.SupportCards),
+				"stage":       "database_save_success",
+			})
 		}
 	} else {
-		fmt.Printf("Support cards not found in API\n")
+		scs.logger.Info("Support cards not found in API", map[string]interface{}{
+			"query": query,
+			"stage": "api_not_found",
+		})
 	}
 
 	return result, nil
@@ -82,7 +116,10 @@ func (scs *SupportCardService) GetSupportCardList() (*shared.SupportCardListResu
 	if result.Found && len(result.SupportCards) > 0 {
 		if err := scs.saveSupportCardsToDatabase(result.SupportCards); err != nil {
 			// Log error but don't fail the search
-			fmt.Printf("Failed to save support cards to database: %v\n", err)
+			scs.logger.Error("Failed to save support cards to database", err, map[string]interface{}{
+				"cards_count": len(result.SupportCards),
+				"stage":       "database_save_failed",
+			})
 		}
 	}
 

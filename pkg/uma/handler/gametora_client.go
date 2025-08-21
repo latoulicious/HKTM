@@ -12,6 +12,7 @@ import (
 
 	"github.com/latoulicious/HKTM/internal/config"
 	"github.com/latoulicious/HKTM/pkg/cron"
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
@@ -28,6 +29,7 @@ type GametoraClient struct {
 	buildID        string
 	buildMutex     sync.RWMutex
 	buildIDManager *cron.BuildIDManager
+	logger         logging.Logger
 }
 
 // GetGametoraClient returns the global Gametora client instance
@@ -73,6 +75,7 @@ func NewGametoraClient(cfg *config.Config) *GametoraClient {
 		},
 		// cache:    make(map[string]*CacheEntry),
 		cacheTTL: 30 * time.Minute, // Cache for 30 minutes
+		logger:   logging.GetGlobalLoggerFactory().CreateLogger("uma_api"),
 	}
 
 	// Initialize build ID manager with config
@@ -93,9 +96,21 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 	}
 	c.buildMutex.RUnlock()
 
+	startTime := time.Now()
+	c.logger.Info("Starting Gametora build ID fetch", map[string]interface{}{
+		"endpoint":     "supports",
+		"api_provider": "gametora",
+	})
+
 	// Fetch the main page to get the build ID
 	resp, err := c.httpClient.Get("https://gametora.com/umamusume/supports")
 	if err != nil {
+		c.logger.Error("Gametora build ID fetch failed", err, map[string]interface{}{
+			"endpoint":     "supports",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"error_type":   "network",
+		})
 		return "", fmt.Errorf("failed to fetch build ID: %v", err)
 	}
 	defer resp.Body.Close()
@@ -103,6 +118,12 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.logger.Error("Failed to read Gametora response body", err, map[string]interface{}{
+			"endpoint":     "supports",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"status_code":  resp.StatusCode,
+		})
 		return "", fmt.Errorf("failed to read response body: %v", err)
 	}
 
@@ -124,6 +145,13 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 					c.buildMutex.Lock()
 					c.buildID = buildID
 					c.buildMutex.Unlock()
+					c.logger.Info("Gametora build ID fetch successful", map[string]interface{}{
+						"endpoint":     "supports",
+						"api_provider": "gametora",
+						"duration_ms":  time.Since(startTime).Milliseconds(),
+						"build_id":     buildID,
+						"method":       "_next/data pattern",
+					})
 					return buildID, nil
 				}
 			}
@@ -142,17 +170,37 @@ func (c *GametoraClient) GetBuildID() (string, error) {
 				c.buildMutex.Lock()
 				c.buildID = buildID
 				c.buildMutex.Unlock()
+				c.logger.Info("Gametora build ID fetch successful", map[string]interface{}{
+					"endpoint":     "supports",
+					"api_provider": "gametora",
+					"duration_ms":  time.Since(startTime).Milliseconds(),
+					"build_id":     buildID,
+					"method":       "buildId JSON pattern",
+				})
 				return buildID, nil
 			}
 		}
 	}
 
 	// If no build ID found, return an error instead of using outdated fallback
+	c.logger.Error("Could not extract build ID from Gametora", nil, map[string]interface{}{
+		"endpoint":     "supports",
+		"api_provider": "gametora",
+		"duration_ms":  time.Since(startTime).Milliseconds(),
+		"error_type":   "parsing",
+	})
 	return "", fmt.Errorf("could not dynamically fetch build ID from Gametora website - the site structure may have changed")
 }
 
 // SearchSimplifiedSupportCard searches for a support card using the Gametora JSON API and returns simplified structure
 func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.SimplifiedGametoraSearchResult {
+	startTime := time.Now()
+	c.logger.Info("Starting Gametora support card search", map[string]interface{}{
+		"query":        query,
+		"endpoint":     "supports.json",
+		"api_provider": "gametora",
+	})
+
 	// Check cache first
 	// cacheKey := fmt.Sprintf("gametora_simplified_support_%s", strings.ToLower(query))
 	// if cached := c.getFromCache(cacheKey); cached != nil {
@@ -164,6 +212,12 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 	// Get build ID
 	buildID, err := c.GetBuildID()
 	if err != nil {
+		c.logger.Error("Failed to get build ID for support search", err, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "supports.json",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+		})
 		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to get build ID: %v", err),
@@ -177,6 +231,14 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 	supportsURL := fmt.Sprintf("%s/%s/umamusume/supports.json", c.baseURL, buildID)
 	resp, err := c.httpClient.Get(supportsURL)
 	if err != nil {
+		c.logger.Error("Gametora supports API request failed", err, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "supports.json",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"build_id":     buildID,
+			"error_type":   "network",
+		})
 		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch supports list: %v", err),
@@ -188,6 +250,14 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("Gametora supports API returned error status", nil, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "supports.json",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"status_code":  resp.StatusCode,
+			"build_id":     buildID,
+		})
 		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("supports API returned status code: %d", resp.StatusCode),
@@ -199,6 +269,13 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 
 	var supportsResp shared.GametoraSupportsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&supportsResp); err != nil {
+		c.logger.Error("Failed to decode Gametora supports response", err, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "supports.json",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"build_id":     buildID,
+		})
 		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode supports response: %v", err),
@@ -344,6 +421,13 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 	}
 
 	if len(allMatches) == 0 {
+		c.logger.Info("Gametora support card search found no matches", map[string]interface{}{
+			"query":        query,
+			"endpoint":     "supports.json",
+			"api_provider": "gametora",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"total_cards":  len(supportsResp.PageProps.SupportData),
+		})
 		result := &shared.SimplifiedGametoraSearchResult{
 			Found: false,
 			Query: query,
@@ -386,6 +470,16 @@ func (c *GametoraClient) SearchSimplifiedSupportCard(query string) *shared.Simpl
 		}
 		simplifiedCards = append(simplifiedCards, simplifiedCard)
 	}
+
+	c.logger.Info("Gametora support card search successful", map[string]interface{}{
+		"query":         query,
+		"endpoint":      "supports.json",
+		"api_provider":  "gametora",
+		"duration_ms":   time.Since(startTime).Milliseconds(),
+		"matches_found": len(simplifiedCards),
+		"best_match":    simplifiedCards[0].CharName,
+		"best_rarity":   simplifiedCards[0].Rarity,
+	})
 
 	result := &shared.SimplifiedGametoraSearchResult{
 		Found:        true,

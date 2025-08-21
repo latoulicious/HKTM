@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/latoulicious/HKTM/pkg/logging"
 	"github.com/latoulicious/HKTM/pkg/uma/shared"
 )
 
@@ -18,6 +19,7 @@ type Client struct {
 	// cache      map[string]*shared.CacheEntry
 	// cacheMutex sync.RWMutex
 	cacheTTL time.Duration
+	logger   logging.Logger
 }
 
 // NewClient creates a new Uma Musume API client
@@ -29,11 +31,19 @@ func NewClient() *Client {
 		},
 		// cache:    make(map[string]*shared.CacheEntry),
 		cacheTTL: 5 * time.Minute, // Cache for 5 minutes
+		logger:   logging.GetGlobalLoggerFactory().CreateLogger("uma_api"),
 	}
 }
 
 // SearchCharacter searches for a character by name
 func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
+	startTime := time.Now()
+	c.logger.Info("Starting Umapyoi character search", map[string]interface{}{
+		"query":        query,
+		"endpoint":     "character/list",
+		"api_provider": "umapyoi",
+	})
+
 	// // Check cache first
 	// cacheKey := fmt.Sprintf("char_search_%s", strings.ToLower(query))
 	// if cached := c.getFromCache(cacheKey); cached != nil {
@@ -46,6 +56,13 @@ func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
 	url := fmt.Sprintf("%s/v1/character/list", c.baseURL)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
+		c.logger.Error("Umapyoi character API request failed", err, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"error_type":   "network",
+		})
 		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch character data: %v", err),
@@ -57,6 +74,13 @@ func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("Umapyoi character API returned error status", nil, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"status_code":  resp.StatusCode,
+		})
 		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
@@ -68,6 +92,12 @@ func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
 
 	var apiResp shared.APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		c.logger.Error("Failed to decode Umapyoi character response", err, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+		})
 		result := &shared.CharacterSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode API response: %v", err),
@@ -79,6 +109,26 @@ func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
 
 	// Find the best match
 	bestMatch := c.findBestMatch(query, apiResp)
+
+	if bestMatch != nil {
+		c.logger.Info("Umapyoi character search successful", map[string]interface{}{
+			"query":            query,
+			"endpoint":         "character/list",
+			"api_provider":     "umapyoi",
+			"duration_ms":      time.Since(startTime).Milliseconds(),
+			"character_id":     bestMatch.ID,
+			"character_name":   bestMatch.NameEn,
+			"total_characters": len(apiResp),
+		})
+	} else {
+		c.logger.Info("Umapyoi character search found no matches", map[string]interface{}{
+			"query":            query,
+			"endpoint":         "character/list",
+			"api_provider":     "umapyoi",
+			"duration_ms":      time.Since(startTime).Milliseconds(),
+			"total_characters": len(apiResp),
+		})
+	}
 
 	result := &shared.CharacterSearchResult{
 		Found:     bestMatch != nil,
@@ -92,6 +142,12 @@ func (c *Client) SearchCharacter(query string) *shared.CharacterSearchResult {
 
 // GetAllCharacters fetches all characters from the API
 func (c *Client) GetAllCharacters() *shared.CharacterListResult {
+	startTime := time.Now()
+	c.logger.Info("Starting Umapyoi all characters fetch", map[string]interface{}{
+		"endpoint":     "character/list",
+		"api_provider": "umapyoi",
+	})
+
 	// // Check cache first
 	// cacheKey := "all_characters"
 	// if cached := c.getFromCache(cacheKey); cached != nil {
@@ -104,6 +160,12 @@ func (c *Client) GetAllCharacters() *shared.CharacterListResult {
 	url := fmt.Sprintf("%s/v1/character/list", c.baseURL)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
+		c.logger.Error("Umapyoi all characters API request failed", err, map[string]interface{}{
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"error_type":   "network",
+		})
 		result := &shared.CharacterListResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch character data: %v", err),
@@ -114,6 +176,12 @@ func (c *Client) GetAllCharacters() *shared.CharacterListResult {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("Umapyoi all characters API returned error status", nil, map[string]interface{}{
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"status_code":  resp.StatusCode,
+		})
 		result := &shared.CharacterListResult{
 			Found: false,
 			Error: fmt.Errorf("API returned status code: %d", resp.StatusCode),
@@ -124,6 +192,11 @@ func (c *Client) GetAllCharacters() *shared.CharacterListResult {
 
 	var apiResp shared.APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		c.logger.Error("Failed to decode Umapyoi all characters response", err, map[string]interface{}{
+			"endpoint":     "character/list",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+		})
 		result := &shared.CharacterListResult{
 			Found: false,
 			Error: fmt.Errorf("failed to decode API response: %v", err),
@@ -131,6 +204,13 @@ func (c *Client) GetAllCharacters() *shared.CharacterListResult {
 		// c.setCache(cacheKey, result)
 		return result
 	}
+
+	c.logger.Info("Umapyoi all characters fetch successful", map[string]interface{}{
+		"endpoint":         "character/list",
+		"api_provider":     "umapyoi",
+		"duration_ms":      time.Since(startTime).Milliseconds(),
+		"characters_count": len(apiResp),
+	})
 
 	result := &shared.CharacterListResult{
 		Found:      true,
@@ -238,6 +318,13 @@ func (c *Client) GetCharacterImages(charaID int) *shared.CharacterImagesResult {
 
 // SearchSupportCard searches for a support card by name
 func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult {
+	startTime := time.Now()
+	c.logger.Info("Starting Umapyoi support card search", map[string]interface{}{
+		"query":        query,
+		"endpoint":     "support",
+		"api_provider": "umapyoi",
+	})
+
 	// // Check cache first
 	// cacheKey := fmt.Sprintf("support_search_%s", strings.ToLower(query))
 	// if cached := c.getFromCache(cacheKey); cached != nil {
@@ -249,6 +336,12 @@ func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult
 	// First, get the list of support cards
 	listResult := c.GetSupportCardList()
 	if !listResult.Found {
+		c.logger.Error("Failed to get support card list for search", listResult.Error, map[string]interface{}{
+			"query":        query,
+			"endpoint":     "support",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+		})
 		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: listResult.Error,
@@ -261,6 +354,13 @@ func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult
 	// Find all matches for the same character
 	matches := c.findAllSupportCardMatches(query, listResult.SupportCards)
 	if len(matches) == 0 {
+		c.logger.Info("Umapyoi support card search found no matches", map[string]interface{}{
+			"query":        query,
+			"endpoint":     "support",
+			"api_provider": "umapyoi",
+			"duration_ms":  time.Since(startTime).Milliseconds(),
+			"total_cards":  len(listResult.SupportCards),
+		})
 		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Query: query,
@@ -279,6 +379,13 @@ func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult
 	}
 
 	if len(detailedCards) == 0 {
+		c.logger.Error("Failed to fetch detailed information for matched support cards", nil, map[string]interface{}{
+			"query":         query,
+			"endpoint":      "support",
+			"api_provider":  "umapyoi",
+			"duration_ms":   time.Since(startTime).Milliseconds(),
+			"matches_found": len(matches),
+		})
 		result := &shared.SupportCardSearchResult{
 			Found: false,
 			Error: fmt.Errorf("failed to fetch detailed information for any matched cards"),
@@ -292,6 +399,16 @@ func (c *Client) SearchSupportCard(query string) *shared.SupportCardSearchResult
 	sort.Slice(detailedCards, func(i, j int) bool {
 		rarityOrder := map[string]int{"SSR": 3, "SR": 2, "R": 1}
 		return rarityOrder[detailedCards[i].RarityString] > rarityOrder[detailedCards[j].RarityString]
+	})
+
+	c.logger.Info("Umapyoi support card search successful", map[string]interface{}{
+		"query":         query,
+		"endpoint":      "support",
+		"api_provider":  "umapyoi",
+		"duration_ms":   time.Since(startTime).Milliseconds(),
+		"matches_found": len(detailedCards),
+		"best_match":    detailedCards[0].TitleEn,
+		"best_rarity":   detailedCards[0].RarityString,
 	})
 
 	result := &shared.SupportCardSearchResult{
