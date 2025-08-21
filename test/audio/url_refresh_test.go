@@ -46,8 +46,12 @@ func TestDetectStreamFailure(t *testing.T) {
 	ytdlpConfig := &audio.YtDlpConfig{
 		BinaryPath: "yt-dlp",
 	}
+	streamingConfig := &audio.StreamingConfig{
+		YtdlpPath:  "yt-dlp",
+		FFmpegPath: "ffmpeg",
+	}
 
-	processor := audio.NewFFmpegProcessor(config, ytdlpConfig, mockLogger)
+	processor := audio.NewFFmpegProcessor(config, ytdlpConfig, streamingConfig, mockLogger)
 
 	testCases := []struct {
 		name     string
@@ -116,8 +120,12 @@ func TestURLRefreshBasicFlow(t *testing.T) {
 	ytdlpConfig := &audio.YtDlpConfig{
 		BinaryPath: "yt-dlp",
 	}
+	streamingConfig := &audio.StreamingConfig{
+		YtdlpPath:  "yt-dlp",
+		FFmpegPath: "ffmpeg",
+	}
 
-	processor := audio.NewFFmpegProcessor(config, ytdlpConfig, mockLogger)
+	processor := audio.NewFFmpegProcessor(config, ytdlpConfig, streamingConfig, mockLogger)
 
 	// Test that URL refresh detection doesn't panic with various error types
 	testErrors := []error{

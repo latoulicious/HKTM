@@ -13,23 +13,24 @@ import (
 
 // FFmpegProcessor implements the StreamProcessor interface for FFmpeg operations
 type FFmpegProcessor struct {
-	config         *FFmpegConfig
-	ytdlpConfig    *YtDlpConfig
-	cmd            *exec.Cmd
-	ytdlpCmd       *exec.Cmd // yt-dlp process for piping
-	outputPipe     io.ReadCloser
-	errorPipe      io.ReadCloser
-	ytdlpErrorPipe io.ReadCloser // yt-dlp stderr pipe
-	isRunning      bool
-	currentURL     string
-	retryCount     int // Current retry attempt
-	maxRetries     int // Maximum retry attempts (3 as per requirements)
-	mu             sync.RWMutex
-	logger         AudioLogger
-	pipelineLogger AudioLogger   // Pipeline-specific logger with context
-	processExited  chan struct{} // Channel to signal when process has exited
-	stderrBuffer   []string      // Buffer to store recent stderr lines for debugging
-	maxStderrLines int           // Maximum number of stderr lines to keep
+	config          *FFmpegConfig
+	ytdlpConfig     *YtDlpConfig
+	streamingConfig *StreamingConfig
+	cmd             *exec.Cmd
+	ytdlpCmd        *exec.Cmd // yt-dlp process for piping
+	outputPipe      io.ReadCloser
+	errorPipe       io.ReadCloser
+	ytdlpErrorPipe  io.ReadCloser // yt-dlp stderr pipe
+	isRunning       bool
+	currentURL      string
+	retryCount      int // Current retry attempt
+	maxRetries      int // Maximum retry attempts (3 as per requirements)
+	mu              sync.RWMutex
+	logger          AudioLogger
+	pipelineLogger  AudioLogger   // Pipeline-specific logger with context
+	processExited   chan struct{} // Channel to signal when process has exited
+	stderrBuffer    []string      // Buffer to store recent stderr lines for debugging
+	maxStderrLines  int           // Maximum number of stderr lines to keep
 
 	// URL refresh detection fields
 	originalURL   string      // Original YouTube URL for refresh
@@ -41,17 +42,18 @@ type FFmpegProcessor struct {
 }
 
 // NewFFmpegProcessor creates a new FFmpegProcessor instance
-func NewFFmpegProcessor(config *FFmpegConfig, ytdlpConfig *YtDlpConfig, logger AudioLogger) StreamProcessor {
+func NewFFmpegProcessor(config *FFmpegConfig, ytdlpConfig *YtDlpConfig, streamingConfig *StreamingConfig, logger AudioLogger) StreamProcessor {
 	// Create pipeline-specific logger context for FFmpeg operations
 	pipelineLogger := logger.WithPipeline("ffmpeg")
 
 	return &FFmpegProcessor{
-		config:         config,
-		ytdlpConfig:    ytdlpConfig,
-		logger:         logger,
-		pipelineLogger: pipelineLogger,
-		maxStderrLines: 50, // Keep last 50 stderr lines for debugging
-		maxRetries:     3,  // 3 attempts max as per requirements
+		config:          config,
+		ytdlpConfig:     ytdlpConfig,
+		streamingConfig: streamingConfig,
+		logger:          logger,
+		pipelineLogger:  pipelineLogger,
+		maxStderrLines:  50, // Keep last 50 stderr lines for debugging
+		maxRetries:      3,  // 3 attempts max as per requirements
 	}
 }
 
@@ -150,11 +152,21 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	// Build yt-dlp command: yt-dlp -o - [url]
 	ytdlpArgs := fp.buildYtdlpArgs(url)
-	fp.ytdlpCmd = exec.Command(fp.ytdlpConfig.BinaryPath, ytdlpArgs...)
+	// Prefer streaming config path, fall back to ytdlp config path
+	ytdlpPath := fp.streamingConfig.YtdlpPath
+	if ytdlpPath == "" {
+		ytdlpPath = fp.ytdlpConfig.BinaryPath
+	}
+	fp.ytdlpCmd = exec.Command(ytdlpPath, ytdlpArgs...)
 
 	// Build FFmpeg command: ffmpeg -i pipe:0 [options] pipe:1
 	ffmpegArgs := fp.buildFFmpegPipeArgs()
-	fp.cmd = exec.Command(fp.config.BinaryPath, ffmpegArgs...)
+	// Prefer streaming config path, fall back to ffmpeg config path
+	ffmpegPath := fp.streamingConfig.FFmpegPath
+	if ffmpegPath == "" {
+		ffmpegPath = fp.config.BinaryPath
+	}
+	fp.cmd = exec.Command(ffmpegPath, ffmpegArgs...)
 
 	// Set up process groups for proper cleanup
 	fp.ytdlpCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -197,8 +209,16 @@ func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.
 
 	// Log the commands for debugging
 	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
-	contextFields["ytdlp_command"] = fp.ytdlpConfig.BinaryPath + " " + strings.Join(ytdlpArgs, " ")
-	contextFields["ffmpeg_command"] = fp.config.BinaryPath + " " + strings.Join(ffmpegArgs, " ")
+	logYtdlpPath := fp.streamingConfig.YtdlpPath
+	if logYtdlpPath == "" {
+		logYtdlpPath = fp.ytdlpConfig.BinaryPath
+	}
+	logFFmpegPath := fp.streamingConfig.FFmpegPath
+	if logFFmpegPath == "" {
+		logFFmpegPath = fp.config.BinaryPath
+	}
+	contextFields["ytdlp_command"] = logYtdlpPath + " " + strings.Join(ytdlpArgs, " ")
+	contextFields["ffmpeg_command"] = logFFmpegPath + " " + strings.Join(ffmpegArgs, " ")
 	urlLogger.Info("Starting yt-dlp | ffmpeg pipeline", contextFields)
 
 	// Start yt-dlp first
@@ -257,13 +277,23 @@ func (fp *FFmpegProcessor) buildYtdlpArgs(url string) []string {
 
 // buildFFmpegPipeArgs constructs FFmpeg arguments for reading from pipe
 func (fp *FFmpegProcessor) buildFFmpegPipeArgs() []string {
+	// Use streaming config values if available, fall back to ffmpeg config
+	sampleRate := fp.streamingConfig.SampleRate
+	if sampleRate == 0 {
+		sampleRate = fp.config.SampleRate
+	}
+	channels := fp.streamingConfig.Channels
+	if channels == 0 {
+		channels = fp.config.Channels
+	}
+
 	args := []string{
 		// Input from pipe (yt-dlp output)
 		"-i", "pipe:0",
 		// Output format options
 		"-f", fp.config.AudioFormat,
-		"-ar", fmt.Sprintf("%d", fp.config.SampleRate),
-		"-ac", fmt.Sprintf("%d", fp.config.Channels),
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
 		// Stability options for streaming
 		"-avoid_negative_ts", "make_zero",
 		"-fflags", "+genpts",
@@ -854,7 +884,13 @@ func (fp *FFmpegProcessor) refreshStreamURL(originalURL string, logger AudioLogg
 	logger.Info("Getting fresh streaming URL", contextFields)
 
 	// Use yt-dlp to extract stream URL with metadata
-	cmd := exec.Command(fp.ytdlpConfig.BinaryPath,
+	// Prefer streaming config path, fall back to ytdlp config path
+	ytdlpPath := fp.streamingConfig.YtdlpPath
+	if ytdlpPath == "" {
+		ytdlpPath = fp.ytdlpConfig.BinaryPath
+	}
+
+	cmd := exec.Command(ytdlpPath,
 		"--get-url",
 		"--quiet",
 		"--no-warnings",

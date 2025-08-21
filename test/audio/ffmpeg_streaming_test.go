@@ -23,11 +23,16 @@ func TestFFmpegStreamingPipeline(t *testing.T) {
 		CustomArgs: []string{"--no-playlist"},
 	}
 
+	streamingConfig := &audio.StreamingConfig{
+		YtdlpPath:  "yt-dlp",
+		FFmpegPath: "ffmpeg",
+	}
+
 	// Create mock logger
 	logger := &MockAudioLogger{}
 
 	// Create FFmpeg processor with new constructor
-	processor := audio.NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, logger)
+	processor := audio.NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, streamingConfig, logger)
 
 	// Test that processor is created successfully
 	if processor == nil {
@@ -63,8 +68,13 @@ func TestFFmpegRetryLogic(t *testing.T) {
 		CustomArgs: []string{"--no-playlist"},
 	}
 
+	streamingConfig := &audio.StreamingConfig{
+		YtdlpPath:  "yt-dlp",
+		FFmpegPath: "ffmpeg",
+	}
+
 	logger := &MockAudioLogger{}
-	processor := audio.NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, logger)
+	processor := audio.NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, streamingConfig, logger)
 
 	// Test with invalid URL to trigger retry logic
 	invalidURL := "https://invalid-url-that-should-fail.com/test"

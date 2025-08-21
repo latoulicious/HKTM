@@ -103,7 +103,8 @@ func createAudioLogger(factory logging.LoggerFactory, guildID string) AudioLogge
 func createStreamProcessor(config ConfigProvider, logger AudioLogger) (StreamProcessor, error) {
 	ffmpegConfig := config.GetFFmpegConfig()
 	ytdlpConfig := config.GetYtDlpConfig()
-	return NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, logger), nil
+	streamingConfig := config.GetStreamingConfig()
+	return NewFFmpegProcessor(ffmpegConfig, ytdlpConfig, streamingConfig, logger), nil
 }
 
 // createAudioEncoder creates an AudioEncoder implementation
