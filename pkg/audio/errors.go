@@ -172,10 +172,13 @@ func (beh *BasicErrorHandler) HandleError(err error, context string) (shouldRetr
 		return false, 0
 	}
 
-	// For retryable errors, calculate exponential backoff delay
-	// We don't track retry attempts here since that's handled by the caller
-	// This method just determines if an error type is retryable and calculates delay
-	delay = beh.calculateExponentialBackoff(1) // Start with attempt 1 for base calculation
+	// For retryable errors, calculate appropriate backoff delay
+	// Use simple backoff for streaming-related errors, exponential for others
+	if beh.isStreamingRelatedError(err) {
+		delay = beh.calculateStreamingBackoff(1) // Start with attempt 1 for base calculation
+	} else {
+		delay = beh.calculateExponentialBackoff(1) // Start with attempt 1 for base calculation
+	}
 
 	contextLogger.Info("Error is retryable, will attempt retry", map[string]interface{}{
 		"error":       err.Error(),
@@ -269,7 +272,47 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 		return true
 	}
 
-	// yt-dlp specific retryable errors
+	// Streaming pipeline errors (retryable)
+	if isStreamingPipelineError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable streaming pipeline error", map[string]interface{}{
+			"error":                 err.Error(),
+			"error_type":            errorType,
+			"classification_reason": "streaming pipeline error pattern matched",
+		})
+		return true
+	}
+
+	// URL expiry errors (retryable)
+	if isURLExpiryError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable URL expiry error", map[string]interface{}{
+			"error":                 err.Error(),
+			"error_type":            errorType,
+			"classification_reason": "URL expiry error pattern matched",
+		})
+		return true
+	}
+
+	// yt-dlp streaming errors (retryable)
+	if isYtDlpStreamingError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable yt-dlp streaming error", map[string]interface{}{
+			"error":                 err.Error(),
+			"error_type":            errorType,
+			"classification_reason": "yt-dlp streaming error pattern matched",
+		})
+		return true
+	}
+
+	// FFmpeg streaming errors (retryable)
+	if isFFmpegStreamingError(err) {
+		beh.pipelineLogger.Debug("Error classified as retryable FFmpeg streaming error", map[string]interface{}{
+			"error":                 err.Error(),
+			"error_type":            errorType,
+			"classification_reason": "FFmpeg streaming error pattern matched",
+		})
+		return true
+	}
+
+	// yt-dlp specific retryable errors (general)
 	if isYtDlpRetryableError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable yt-dlp error", map[string]interface{}{
 			"error":                 err.Error(),
@@ -279,7 +322,7 @@ func (beh *BasicErrorHandler) IsRetryableError(err error) bool {
 		return true
 	}
 
-	// FFmpeg specific retryable errors
+	// FFmpeg specific retryable errors (general)
 	if isFFmpegRetryableError(errorStr) {
 		beh.pipelineLogger.Debug("Error classified as retryable FFmpeg error", map[string]interface{}{
 			"error":                 err.Error(),
@@ -337,6 +380,30 @@ func (beh *BasicErrorHandler) calculateExponentialBackoff(attempt int) time.Dura
 	return delay
 }
 
+// calculateStreamingBackoff calculates simple backoff delays for streaming failures (2s, 5s, 10s)
+func (beh *BasicErrorHandler) calculateStreamingBackoff(attempt int) time.Duration {
+	// Simple backoff for streaming failures: 2s, 5s, 10s
+	switch attempt {
+	case 1:
+		return 2 * time.Second
+	case 2:
+		return 5 * time.Second
+	case 3:
+		return 10 * time.Second
+	default:
+		// For attempts beyond 3, use the maximum delay
+		return 10 * time.Second
+	}
+}
+
+// isStreamingRelatedError checks if an error is streaming-related and should use simple backoff
+func (beh *BasicErrorHandler) isStreamingRelatedError(err error) bool {
+	return isStreamingPipelineError(err) ||
+		isURLExpiryError(err) ||
+		isYtDlpStreamingError(err) ||
+		isFFmpegStreamingError(err)
+}
+
 // classifyErrorType returns a string classification of the error type for database storage
 func (beh *BasicErrorHandler) classifyErrorType(err error) string {
 	if err == nil {
@@ -344,6 +411,26 @@ func (beh *BasicErrorHandler) classifyErrorType(err error) string {
 	}
 
 	errorStr := strings.ToLower(err.Error())
+
+	// Streaming pipeline errors (new for streaming improvements)
+	if isStreamingPipelineError(err) {
+		return "streaming_pipeline"
+	}
+
+	// URL expiry/refresh errors (new for streaming improvements)
+	if isURLExpiryError(err) {
+		return "url_expiry"
+	}
+
+	// yt-dlp specific streaming errors (enhanced classification)
+	if isYtDlpStreamingError(err) {
+		return "yt-dlp_streaming"
+	}
+
+	// FFmpeg streaming errors (enhanced classification)
+	if isFFmpegStreamingError(err) {
+		return "ffmpeg_streaming"
+	}
 
 	// Network errors
 	if isNetworkError(err) {
@@ -355,12 +442,12 @@ func (beh *BasicErrorHandler) classifyErrorType(err error) string {
 		return "process"
 	}
 
-	// yt-dlp errors
+	// yt-dlp errors (general)
 	if strings.Contains(errorStr, "yt-dlp") || strings.Contains(errorStr, "youtube-dl") {
 		return "yt-dlp"
 	}
 
-	// FFmpeg errors
+	// FFmpeg errors (general)
 	if strings.Contains(errorStr, "ffmpeg") {
 		return "ffmpeg"
 	}
@@ -549,9 +636,136 @@ func isTemporaryFileSystemError(errorStr string) bool {
 	return false
 }
 
+// isStreamingPipelineError checks if an error is related to the streaming pipeline
+func isStreamingPipelineError(err error) bool {
+	errorStr := strings.ToLower(err.Error())
+
+	streamingPatterns := []string{
+		"streaming pipeline",
+		"pipeline failed",
+		"pipe broken",
+		"pipe closed",
+		"process chain",
+		"pipeline error",
+		"stream interrupted",
+		"pipeline timeout",
+		"process synchronization",
+		"pipeline coordination",
+	}
+
+	for _, pattern := range streamingPatterns {
+		if strings.Contains(errorStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isURLExpiryError checks if an error is related to URL expiration or refresh
+func isURLExpiryError(err error) bool {
+	errorStr := strings.ToLower(err.Error())
+
+	urlExpiryPatterns := []string{
+		"url expired",
+		"url expiry",
+		"url refresh",
+		"stream url",
+		"url invalid",
+		"url not found",
+		"expired stream",
+		"stream expired",
+		"url ttl",
+		"refresh failed",
+		"url lifecycle",
+	}
+
+	for _, pattern := range urlExpiryPatterns {
+		if strings.Contains(errorStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isYtDlpStreamingError checks if an error is specifically related to yt-dlp streaming operations
+func isYtDlpStreamingError(err error) bool {
+	errorStr := strings.ToLower(err.Error())
+
+	// Must contain yt-dlp reference AND streaming-related patterns
+	hasYtDlp := strings.Contains(errorStr, "yt-dlp") || strings.Contains(errorStr, "youtube-dl")
+	if !hasYtDlp {
+		return false
+	}
+
+	streamingPatterns := []string{
+		"streaming",
+		"pipe",
+		"stdout",
+		"output",
+		"format extraction",
+		"stream extraction",
+		"download interrupted",
+		"stream failed",
+		"extraction failed",
+		"format unavailable",
+	}
+
+	for _, pattern := range streamingPatterns {
+		if strings.Contains(errorStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isFFmpegStreamingError checks if an error is specifically related to FFmpeg streaming operations
+func isFFmpegStreamingError(err error) bool {
+	errorStr := strings.ToLower(err.Error())
+
+	// Must contain ffmpeg reference AND streaming-related patterns
+	hasFFmpeg := strings.Contains(errorStr, "ffmpeg")
+	if !hasFFmpeg {
+		return false
+	}
+
+	streamingPatterns := []string{
+		"pipe",
+		"stdin",
+		"stdout",
+		"streaming",
+		"input/output error",
+		"broken pipe",
+		"end of file",
+		"invalid data found",
+		"stream mapping",
+		"codec parameters",
+		"format detection",
+	}
+
+	for _, pattern := range streamingPatterns {
+		if strings.Contains(errorStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // GetRetryDelay calculates the delay for a specific retry attempt number
 // This is a utility method that can be used by callers to get consistent delay calculations
 func (beh *BasicErrorHandler) GetRetryDelay(attempt int) time.Duration {
+	return beh.calculateExponentialBackoff(attempt)
+}
+
+// GetRetryDelayForError calculates the delay for a specific retry attempt based on error type
+// Uses simple backoff (2s, 5s, 10s) for streaming errors, exponential backoff for others
+func (beh *BasicErrorHandler) GetRetryDelayForError(err error, attempt int) time.Duration {
+	if beh.isStreamingRelatedError(err) {
+		return beh.calculateStreamingBackoff(attempt)
+	}
 	return beh.calculateExponentialBackoff(attempt)
 }
 
@@ -596,6 +810,41 @@ func CreateMaxRetriesError(lastErr error, attempts int) error {
 	return fmt.Errorf("max retries exceeded after %d attempts, last error: %w", attempts, lastErr)
 }
 
+// Streaming-specific error creation functions
+
+// CreateStreamingPipelineError creates an error for streaming pipeline failures
+func CreateStreamingPipelineError(component string, originalErr error) error {
+	return fmt.Errorf("streaming pipeline error in %s: %w", component, originalErr)
+}
+
+// CreateURLExpiryError creates an error for URL expiry/refresh failures
+func CreateURLExpiryError(url string, originalErr error) error {
+	return fmt.Errorf("url expiry error for %s: %w", url, originalErr)
+}
+
+// CreateYtDlpStreamingError creates an error for yt-dlp streaming failures
+func CreateYtDlpStreamingError(operation string, originalErr error) error {
+	return fmt.Errorf("yt-dlp streaming error during %s: %w", operation, originalErr)
+}
+
+// CreateFFmpegStreamingError creates an error for FFmpeg streaming failures
+func CreateFFmpegStreamingError(operation string, originalErr error) error {
+	return fmt.Errorf("ffmpeg streaming error during %s: %w", operation, originalErr)
+}
+
+// IsStreamingError checks if an error is any type of streaming-related error
+func IsStreamingError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errorStr := strings.ToLower(err.Error())
+	return strings.Contains(errorStr, "streaming pipeline") ||
+		strings.Contains(errorStr, "url expiry") ||
+		strings.Contains(errorStr, "yt-dlp streaming") ||
+		strings.Contains(errorStr, "ffmpeg streaming")
+}
+
 // createDebugContext creates enhanced debugging context for error logging
 func (beh *BasicErrorHandler) createDebugContext(err error, context string, errorType string) map[string]interface{} {
 	// Start with shared context fields using utility function
@@ -611,6 +860,14 @@ func (beh *BasicErrorHandler) createDebugContext(err error, context string, erro
 
 	// Add error-specific debugging information
 	switch errorType {
+	case "streaming_pipeline":
+		debugContext["streaming_pipeline_details"] = beh.extractStreamingPipelineErrorDetails(err)
+	case "url_expiry":
+		debugContext["url_expiry_details"] = beh.extractURLExpiryErrorDetails(err)
+	case "yt-dlp_streaming":
+		debugContext["ytdlp_streaming_details"] = beh.extractYtDlpStreamingErrorDetails(err)
+	case "ffmpeg_streaming":
+		debugContext["ffmpeg_streaming_details"] = beh.extractFFmpegStreamingErrorDetails(err)
 	case "network":
 		debugContext["network_error_details"] = beh.extractNetworkErrorDetails(err)
 	case "process":
@@ -659,6 +916,14 @@ func (beh *BasicErrorHandler) formatContextForDatabase(originalContext string, d
 // createUserFriendlyErrorMessage creates a user-friendly error message for Discord notifications
 func (beh *BasicErrorHandler) createUserFriendlyErrorMessage(err error, errorType string) string {
 	switch errorType {
+	case "streaming_pipeline":
+		return "Audio streaming pipeline encountered an issue. The system will automatically retry to restore playback."
+	case "url_expiry":
+		return "The audio stream URL has expired. The system is refreshing the connection to continue playback."
+	case "yt-dlp_streaming":
+		return "Issue with audio stream extraction. This is usually temporary and the system will retry automatically."
+	case "ffmpeg_streaming":
+		return "Audio stream processing encountered an issue. The system will attempt to restart the audio pipeline."
 	case "network":
 		return "Network connection issue. This might be temporary - please try again in a few moments."
 	case "yt-dlp":
@@ -792,6 +1057,68 @@ func (beh *BasicErrorHandler) extractEncodingErrorDetails(err error) map[string]
 	details["pcm_error"] = strings.Contains(errorStr, "pcm")
 	details["frame_size_error"] = strings.Contains(errorStr, "frame size")
 	details["sample_rate_error"] = strings.Contains(errorStr, "sample rate")
+
+	return details
+}
+
+// extractStreamingPipelineErrorDetails extracts details for streaming pipeline errors
+func (beh *BasicErrorHandler) extractStreamingPipelineErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["pipeline_failed"] = strings.Contains(errorStr, "pipeline failed")
+	details["pipe_broken"] = strings.Contains(errorStr, "pipe broken") || strings.Contains(errorStr, "broken pipe")
+	details["pipe_closed"] = strings.Contains(errorStr, "pipe closed")
+	details["process_chain_error"] = strings.Contains(errorStr, "process chain")
+	details["stream_interrupted"] = strings.Contains(errorStr, "stream interrupted")
+	details["pipeline_timeout"] = strings.Contains(errorStr, "pipeline timeout")
+	details["coordination_error"] = strings.Contains(errorStr, "coordination") || strings.Contains(errorStr, "synchronization")
+
+	return details
+}
+
+// extractURLExpiryErrorDetails extracts details for URL expiry/refresh errors
+func (beh *BasicErrorHandler) extractURLExpiryErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["url_expired"] = strings.Contains(errorStr, "url expired") || strings.Contains(errorStr, "expired")
+	details["url_invalid"] = strings.Contains(errorStr, "url invalid") || strings.Contains(errorStr, "invalid")
+	details["refresh_failed"] = strings.Contains(errorStr, "refresh failed") || strings.Contains(errorStr, "refresh")
+	details["stream_url_error"] = strings.Contains(errorStr, "stream url")
+	details["url_not_found"] = strings.Contains(errorStr, "url not found") || strings.Contains(errorStr, "not found")
+	details["ttl_exceeded"] = strings.Contains(errorStr, "ttl") || strings.Contains(errorStr, "time to live")
+
+	return details
+}
+
+// extractYtDlpStreamingErrorDetails extracts details for yt-dlp streaming-specific errors
+func (beh *BasicErrorHandler) extractYtDlpStreamingErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["extraction_failed"] = strings.Contains(errorStr, "extraction failed")
+	details["format_unavailable"] = strings.Contains(errorStr, "format unavailable")
+	details["stream_extraction_error"] = strings.Contains(errorStr, "stream extraction")
+	details["download_interrupted"] = strings.Contains(errorStr, "download interrupted")
+	details["pipe_output_error"] = strings.Contains(errorStr, "pipe") || strings.Contains(errorStr, "stdout")
+	details["streaming_mode_error"] = strings.Contains(errorStr, "streaming")
+
+	return details
+}
+
+// extractFFmpegStreamingErrorDetails extracts details for FFmpeg streaming-specific errors
+func (beh *BasicErrorHandler) extractFFmpegStreamingErrorDetails(err error) map[string]interface{} {
+	details := make(map[string]interface{})
+	errorStr := strings.ToLower(err.Error())
+
+	details["pipe_input_error"] = strings.Contains(errorStr, "pipe") || strings.Contains(errorStr, "stdin")
+	details["format_detection_error"] = strings.Contains(errorStr, "format detection")
+	details["codec_parameters_error"] = strings.Contains(errorStr, "codec parameters")
+	details["stream_mapping_error"] = strings.Contains(errorStr, "stream mapping")
+	details["invalid_data_error"] = strings.Contains(errorStr, "invalid data found")
+	details["end_of_file_error"] = strings.Contains(errorStr, "end of file")
+	details["io_error"] = strings.Contains(errorStr, "input/output error")
 
 	return details
 }

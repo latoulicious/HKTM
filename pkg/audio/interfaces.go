@@ -56,6 +56,7 @@ type ErrorHandler interface {
 	LogError(err error, context string)
 	IsRetryableError(err error) bool
 	GetRetryDelay(attempt int) time.Duration
+	GetRetryDelayForError(err error, attempt int) time.Duration
 	GetMaxRetries() int
 	ShouldRetryAfterAttempts(attempts int, err error) bool
 
