@@ -42,3 +42,12 @@ components = ["audio", "commands", "database", "system"]  # Centralized logging 
 [metrics]
 enabled = true
 retention_days = 30  # How long to keep metrics in database
+
+[ytdlp]
+binary_path = "yt-dlp"
+format = "bestaudio/best"          # Get best audio quality with fallback to best
+timeout = 30
+extract_flat = false               # Get full metadata
+quiet = true                       # Reduce output noise
+no_warnings = true
+custom_args = ["--no-playlist", "--no-check-certificate", "--socket-timeout", "30", "--retries", "3"]

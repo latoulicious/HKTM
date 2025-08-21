@@ -148,8 +148,110 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 	return nil, fmt.Errorf("failed to start stream after %d attempts: %w", fp.maxRetries+1, lastErr)
 }
 
-// startPipeline starts the yt-dlp | ffmpeg pipeline
+// startPipeline starts the appropriate pipeline based on URL type
 func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+	// Check if this is a streaming URL (from yt-dlp) or a YouTube URL
+	if fp.isStreamingURL(url) {
+		// For streaming URLs, use FFmpeg directly
+		return fp.startFFmpegDirectPipeline(url, urlLogger)
+	} else {
+		// For YouTube URLs, use yt-dlp | ffmpeg pipeline
+		return fp.startYtdlpFFmpegPipeline(url, urlLogger)
+	}
+}
+
+// isStreamingURL checks if the URL is a direct streaming URL (not a YouTube URL)
+func (fp *FFmpegProcessor) isStreamingURL(url string) bool {
+	// Check if it's a direct streaming URL (contains googlevideo.com, manifest, etc.)
+	// But NOT a YouTube watch URL
+	streamingPatterns := []string{
+		"googlevideo.com",
+		"manifest.googlevideo.com",
+		"manifest",
+		"m3u8",
+		"mpd",
+		"index.m3u8",
+	}
+
+	// If it's a YouTube watch URL, it's NOT a streaming URL
+	if strings.Contains(url, "youtube.com/watch") || strings.Contains(url, "youtu.be/") {
+		return false
+	}
+
+	urlLower := strings.ToLower(url)
+	for _, pattern := range streamingPatterns {
+		if strings.Contains(urlLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// startFFmpegDirectPipeline starts FFmpeg directly with a streaming URL
+func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+	// Build FFmpeg command for direct streaming URL
+	ffmpegArgs := fp.buildFFmpegDirectArgs(url)
+	// Prefer streaming config path, fall back to ffmpeg config path
+	ffmpegPath := fp.streamingConfig.FFmpegPath
+	if ffmpegPath == "" {
+		ffmpegPath = fp.config.BinaryPath
+	}
+	fp.cmd = exec.Command(ffmpegPath, ffmpegArgs...)
+
+	// Set up process groups for proper cleanup
+	fp.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Create FFmpeg output pipe (audio data)
+	ffmpegStdout, err := fp.cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ffmpeg stdout pipe: %w", err)
+	}
+	fp.outputPipe = ffmpegStdout
+
+	// Create stderr pipe for monitoring
+	ffmpegStderr, err := fp.cmd.StderrPipe()
+	if err != nil {
+		ffmpegStdout.Close()
+		return nil, fmt.Errorf("failed to create ffmpeg stderr pipe: %w", err)
+	}
+	fp.errorPipe = ffmpegStderr
+
+	// Log the command for debugging
+	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
+	logFFmpegPath := fp.streamingConfig.FFmpegPath
+	if logFFmpegPath == "" {
+		logFFmpegPath = fp.config.BinaryPath
+	}
+	contextFields["ffmpeg_command"] = logFFmpegPath + " " + strings.Join(ffmpegArgs, " ")
+	contextFields["pipeline_type"] = "direct_ffmpeg"
+	urlLogger.Info("Starting direct FFmpeg pipeline", contextFields)
+
+	// Start FFmpeg
+	if err := fp.cmd.Start(); err != nil {
+		ffmpegStdout.Close()
+		ffmpegStderr.Close()
+		return nil, fmt.Errorf("failed to start ffmpeg process: %w", err)
+	}
+
+	fp.isRunning = true
+	fp.processExited = make(chan struct{})
+	fp.stderrBuffer = make([]string, 0, fp.maxStderrLines)
+
+	// Start monitoring
+	go fp.monitorStderr()
+	go fp.monitorProcess()
+
+	urlLogger.Info("Direct FFmpeg pipeline started successfully", contextFields)
+
+	// Give the pipeline a moment to initialize
+	time.Sleep(100 * time.Millisecond)
+
+	return ffmpegStdout, nil
+}
+
+// startYtdlpFFmpegPipeline starts the yt-dlp | ffmpeg pipeline for YouTube URLs
+func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	// Build yt-dlp command: yt-dlp -o - [url]
 	ytdlpArgs := fp.buildYtdlpArgs(url)
 	// Prefer streaming config path, fall back to ytdlp config path
@@ -157,6 +259,12 @@ func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.
 	if ytdlpPath == "" {
 		ytdlpPath = fp.ytdlpConfig.BinaryPath
 	}
+
+	// Validate yt-dlp is available
+	if _, err := exec.LookPath(ytdlpPath); err != nil {
+		return nil, fmt.Errorf("yt-dlp not found at path '%s': %w", ytdlpPath, err)
+	}
+
 	fp.ytdlpCmd = exec.Command(ytdlpPath, ytdlpArgs...)
 
 	// Build FFmpeg command: ffmpeg -i pipe:0 [options] pipe:1
@@ -219,6 +327,9 @@ func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.
 	}
 	contextFields["ytdlp_command"] = logYtdlpPath + " " + strings.Join(ytdlpArgs, " ")
 	contextFields["ffmpeg_command"] = logFFmpegPath + " " + strings.Join(ffmpegArgs, " ")
+	contextFields["pipeline_type"] = "ytdlp_ffmpeg"
+	contextFields["ytdlp_args_count"] = len(ytdlpArgs)
+	contextFields["ffmpeg_args_count"] = len(ffmpegArgs)
 	urlLogger.Info("Starting yt-dlp | ffmpeg pipeline", contextFields)
 
 	// Start yt-dlp first
@@ -261,9 +372,9 @@ func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.
 func (fp *FFmpegProcessor) buildYtdlpArgs(url string) []string {
 	args := []string{
 		"-o", "-", // Output to stdout for piping
-		"--quiet",               // Reduce output noise
-		"--no-warnings",         // Suppress warnings
-		"--format", "bestaudio", // Get best audio quality
+		"--quiet",                    // Reduce output noise
+		"--no-warnings",              // Suppress warnings
+		"--format", "bestaudio/best", // Fallback to best if bestaudio not available
 	}
 
 	// Add custom arguments from configuration
@@ -883,43 +994,17 @@ func (fp *FFmpegProcessor) refreshStreamURL(originalURL string, logger AudioLogg
 	contextFields := CreateContextFieldsWithComponent("", "", originalURL, "url_refresh")
 	logger.Info("Getting fresh streaming URL", contextFields)
 
-	// Use yt-dlp to extract stream URL with metadata
-	// Prefer streaming config path, fall back to ytdlp config path
-	ytdlpPath := fp.streamingConfig.YtdlpPath
-	if ytdlpPath == "" {
-		ytdlpPath = fp.ytdlpConfig.BinaryPath
-	}
-
-	cmd := exec.Command(ytdlpPath,
-		"--get-url",
-		"--quiet",
-		"--no-warnings",
-		"--format", "bestaudio",
-		originalURL)
-
-	output, err := cmd.Output()
-	if err != nil {
-		contextFields["error"] = err.Error()
-		logger.Error("yt-dlp URL extraction failed", err, contextFields)
-		return fmt.Errorf("yt-dlp extraction failed: %w", err)
-	}
-
-	streamURL := strings.TrimSpace(string(output))
-	if streamURL == "" {
-		logger.Error("yt-dlp returned empty URL", fmt.Errorf("empty URL"), contextFields)
-		return fmt.Errorf("yt-dlp returned empty URL")
-	}
-
-	// YouTube URLs typically expire after 5-6 minutes
-	// We'll be conservative and assume 5 minutes
-	fp.streamURL = streamURL
+	// For YouTube URLs, we want to use yt-dlp directly in the pipeline
+	// Don't extract the direct URL - let yt-dlp handle the format selection
+	fp.streamURL = originalURL
 	fp.urlStartTime = time.Now()
 	fp.urlExpiry = fp.urlStartTime.Add(5 * time.Minute)
 
-	contextFields["stream_url"] = streamURL
+	contextFields["stream_url"] = originalURL
 	contextFields["expiry_time"] = fp.urlExpiry.Format(time.RFC3339)
 	contextFields["estimated_ttl"] = "5m"
-	logger.Info("Fresh streaming URL obtained", contextFields)
+	contextFields["using_original_url"] = true
+	logger.Info("Using original YouTube URL for yt-dlp pipeline", contextFields)
 
 	// Start proactive refresh timer (Requirement 8.2)
 	fp.startURLRefreshTimer(originalURL, logger)
@@ -1064,4 +1149,59 @@ func (fp *FFmpegProcessor) restartWithFreshURL(logger AudioLogger) error {
 	// Start new pipeline with fresh URL
 	_, err := fp.startPipeline(fp.streamURL, logger)
 	return err
+}
+
+// buildFFmpegDirectArgs constructs FFmpeg arguments for direct streaming URL input
+func (fp *FFmpegProcessor) buildFFmpegDirectArgs(url string) []string {
+	// Use streaming config values if available, fall back to ffmpeg config
+	sampleRate := fp.streamingConfig.SampleRate
+	if sampleRate == 0 {
+		sampleRate = fp.config.SampleRate
+	}
+	channels := fp.streamingConfig.Channels
+	if channels == 0 {
+		channels = fp.config.Channels
+	}
+
+	args := []string{
+		// Input from direct URL
+		"-i", url,
+		// Output format options
+		"-f", fp.config.AudioFormat,
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
+		// HLS/Streaming specific options
+		"-reconnect", "1",
+		"-reconnect_delay_max", "5",
+		"-reconnect_at_eof", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_on_network_error", "1",
+		// Buffer and timing options
+		"-bufsize", "64k",
+		"-probesize", "64k",
+		"-analyzeduration", "5000000",
+		// Stability options for streaming
+		"-avoid_negative_ts", "make_zero",
+		"-fflags", "+genpts+nobuffer+igndts",
+		// Reduce output noise
+		"-hide_banner",
+		"-loglevel", "info",
+	}
+
+	// Add custom arguments from configuration (but avoid duplicates)
+	for _, customArg := range fp.config.CustomArgs {
+		// Skip arguments we already added
+		if customArg != "-reconnect" && customArg != "1" &&
+			customArg != "-reconnect_delay_max" && customArg != "5" &&
+			customArg != "-avoid_negative_ts" && customArg != "make_zero" &&
+			customArg != "-fflags" && customArg != "+genpts+nobuffer+igndts" &&
+			customArg != "-hide_banner" && customArg != "-loglevel" && customArg != "info" {
+			args = append(args, customArg)
+		}
+	}
+
+	// Output to stdout
+	args = append(args, "pipe:1")
+
+	return args
 }

@@ -183,11 +183,13 @@ func (ap *AudioPipeline) streamLoop(streamURL string) {
 
 // streamAudio handles the actual audio streaming
 func (ap *AudioPipeline) streamAudio(streamURL string) error {
-	// Create FFmpeg command with better error handling and buffering
+	// Create FFmpeg command with improved buffering and performance
 	cmd := exec.CommandContext(ap.ctx, "ffmpeg",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
+		"-reconnect_at_eof", "1",
+		"-reconnect_on_network_error", "1",
 		"-timeout", "30", // Add timeout for initial connection
 		"-rw_timeout", "30000000", // 30 second read/write timeout
 		"-i", streamURL,
@@ -195,8 +197,14 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 		"-acodec", "pcm_s16le",
 		"-ar", "48000",
 		"-ac", "2",
-		"-bufsize", "64k",
-		"-max_muxing_queue_size", "1024", // Increase queue size
+		// Improved buffering for smoother streaming
+		"-bufsize", "256k", // Increased buffer size
+		"-max_muxing_queue_size", "2048", // Larger queue
+		"-probesize", "128k", // Larger probe size
+		"-analyzeduration", "10000000", // 10 seconds analysis
+		// Reduce output noise
+		"-hide_banner",
+		"-loglevel", "error",
 		"-")
 
 	ap.ffmpegCmd = cmd
@@ -265,11 +273,22 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 	return ap.streamPCMToDiscord(stdout)
 }
 
+// Audio frame constants
+const (
+	audioFrameSize = 1920 // 960 samples * 2 channels for 20ms
+	audioChunkSize = 3840 // 20ms of audio data in bytes
+)
+
 // streamPCMToDiscord handles the PCM to Opus conversion and Discord streaming
 func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
-	// Use buffered reader for better performance
-	buffer := make([]byte, 3840) // 960 samples * 2 channels * 2 bytes (20ms at 48kHz)
+	// Use larger buffer for better performance and reduced read frequency
+	const bufferSize = audioChunkSize * 10 // 10 frames = 200ms of audio
+
+	buffer := make([]byte, bufferSize)
 	frameCount := 0
+
+	// Create a buffered reader to handle variable data rates
+	bufReader := io.Reader(reader)
 
 	for {
 		select {
@@ -278,12 +297,13 @@ func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
 		default:
 		}
 
-		// Read PCM data with timeout
+		// Read PCM data with improved buffering strategy
 		readDone := make(chan int, 1)
 		readErr := make(chan error, 1)
 
 		go func() {
-			n, err := io.ReadFull(reader, buffer)
+			// Try to read full buffer first, fall back to partial reads
+			n, err := bufReader.Read(buffer)
 			if err != nil {
 				readErr <- err
 				return
@@ -296,6 +316,25 @@ func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
 
 		select {
 		case n = <-readDone:
+			if n > 0 {
+				// Process audio in 20ms chunks
+				for offset := 0; offset < n; offset += audioChunkSize {
+					end := offset + audioChunkSize
+					if end > n {
+						end = n
+					}
+
+					chunkSize := end - offset
+					if chunkSize < audioChunkSize {
+						// Pad the last chunk if it's smaller than frame size
+						padded := make([]byte, audioChunkSize)
+						copy(padded, buffer[offset:end])
+						ap.processAudioChunk(padded[:audioChunkSize], &frameCount)
+					} else {
+						ap.processAudioChunk(buffer[offset:end], &frameCount)
+					}
+				}
+			}
 		case err = <-readErr:
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				log.Println("FFmpeg stream ended normally")
@@ -309,7 +348,7 @@ func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
 				}
 			}
 			return fmt.Errorf("error reading PCM data: %v", err)
-		case <-time.After(10 * time.Second): // Increased timeout
+		case <-time.After(15 * time.Second): // Increased timeout for larger buffers
 			// Check if FFmpeg process is still running
 			if ap.ffmpegCmd != nil && ap.ffmpegCmd.Process != nil {
 				if ap.ffmpegCmd.ProcessState != nil && ap.ffmpegCmd.ProcessState.Exited() {
@@ -319,44 +358,45 @@ func (ap *AudioPipeline) streamPCMToDiscord(reader io.Reader) error {
 			}
 			return fmt.Errorf("timeout reading PCM data")
 		}
+	}
+}
 
-		if n > 0 {
-			// Convert bytes to int16 samples
-			samples := bytesToInt16(buffer[:n])
+// processAudioChunk handles encoding and sending a single audio chunk to Discord
+func (ap *AudioPipeline) processAudioChunk(chunk []byte, frameCount *int) {
+	// Convert bytes to int16 samples
+	samples := bytesToInt16(chunk)
 
-			// Ensure we have exactly 960 samples per channel for 20ms frames
-			if len(samples) != 1920 { // 960 samples * 2 channels
-				// Pad or truncate to correct size
-				if len(samples) < 1920 {
-					padded := make([]int16, 1920)
-					copy(padded, samples)
-					samples = padded
-				} else {
-					samples = samples[:1920]
-				}
-			}
-
-			// Encode to Opus
-			opusData, err := ap.opusEncoder.Encode(samples, 960, len(buffer))
-			if err != nil {
-				log.Printf("Opus encoding error: %v", err)
-				continue
-			}
-
-			// Send to Discord with non-blocking send
-			select {
-			case ap.voiceConn.OpusSend <- opusData:
-				frameCount++
-				ap.lastFrameTime = time.Now()
-
-				// Log progress every 100 frames (2 seconds)
-				if frameCount%100 == 0 {
-					log.Printf("Streamed %d frames", frameCount)
-				}
-			case <-time.After(100 * time.Millisecond):
-				log.Println("Warning: OpusSend channel blocked, skipping frame")
-			}
+	// Ensure we have exactly 960 samples per channel for 20ms frames
+	if len(samples) != audioFrameSize {
+		// Pad or truncate to correct size
+		if len(samples) < audioFrameSize {
+			padded := make([]int16, audioFrameSize)
+			copy(padded, samples)
+			samples = padded
+		} else {
+			samples = samples[:audioFrameSize]
 		}
+	}
+
+	// Encode to Opus
+	opusData, err := ap.opusEncoder.Encode(samples, 960, len(chunk))
+	if err != nil {
+		log.Printf("Opus encoding error: %v", err)
+		return
+	}
+
+	// Send to Discord with non-blocking send
+	select {
+	case ap.voiceConn.OpusSend <- opusData:
+		*frameCount++
+		ap.lastFrameTime = time.Now()
+
+		// Log progress every 100 frames (2 seconds)
+		if *frameCount%100 == 0 {
+			log.Printf("Streamed %d frames (%.1fs of audio)", *frameCount, float64(*frameCount)*0.02)
+		}
+	case <-time.After(100 * time.Millisecond):
+		log.Println("Warning: OpusSend channel blocked, skipping frame")
 	}
 }
 

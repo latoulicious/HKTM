@@ -444,13 +444,18 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	frameSize := c.audioEncoder.GetFrameSize()
 	frameDuration := c.audioEncoder.GetFrameDuration()
 
-	// Prepare buffers for audio processing
-	pcmBuffer := make([]int16, frameSize)
-	byteBuffer := make([]byte, frameSize*2) // 2 bytes per int16 sample
+	// Prepare buffers for batch audio processing (10 frames = 200ms)
+	const batchSize = 10 // Process 10 frames at once
+	batchFrameSize := frameSize * batchSize
+	pcmBuffer := make([]int16, batchFrameSize)
+	byteBuffer := make([]byte, batchFrameSize*2) // 2 bytes per int16 sample
 
 	contextFields["frame_size"] = frameSize
+	contextFields["batch_size"] = batchSize
+	contextFields["batch_frame_size"] = batchFrameSize
 	contextFields["frame_duration"] = FormatDuration(frameDuration)
-	c.logger.Debug("Audio streaming buffers initialized", contextFields)
+	contextFields["batch_duration"] = FormatDuration(frameDuration * time.Duration(batchSize))
+	c.logger.Debug("Audio streaming buffers initialized for batch processing", contextFields)
 
 	// Streaming statistics
 	framesProcessed := 0
@@ -519,58 +524,120 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 				pcmBuffer[i] = int16(byteBuffer[i*2]) | int16(byteBuffer[i*2+1])<<8
 			}
 
-			// Validate frame size before encoding
-			if err := c.audioEncoder.ValidateFrameSize(pcmBuffer[:samplesRead]); err != nil {
-				c.logger.Warn("Invalid frame size, adjusting", CreateContextFieldsWithComponent(guildID, "", url, "frame_validation"))
-				// Continue with available samples - encoder should handle partial frames
-			}
+			// Process audio in individual 20ms frames for Discord compatibility
+			// Each frame must be exactly 960 samples (20ms at 48kHz stereo)
+			for offset := 0; offset < samplesRead; offset += frameSize {
+				end := offset + frameSize
+				if end > samplesRead {
+					end = samplesRead
+				}
 
-			// Encode PCM data to Opus format
-			opusData, err := c.audioEncoder.EncodeFrame(pcmBuffer[:samplesRead])
-			if err != nil {
-				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
-				errorContextFields["samples_count"] = samplesRead
-				errorContextFields["frame_number"] = framesProcessed
-
-				c.logger.Error("Encoding error", err, errorContextFields)
-				c.handlePlaybackError(err, "encoding")
-				return
-			}
-
-			// Send encoded audio to Discord voice connection
-			if c.voiceConn != nil && c.voiceConn.OpusSend != nil {
-				select {
-				case c.voiceConn.OpusSend <- opusData:
-					// Successfully sent frame
-					framesProcessed++
-
-					// Log progress much less frequently (every 500 frames = ~10 seconds)
-					if framesProcessed%500 == 0 {
-						progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
-						progressFields["frames_processed"] = framesProcessed
-						progressFields["bytes_processed"] = bytesProcessed
-						progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
-						c.logger.Info("Streaming progress", progressFields)
+				// Get current frame data
+				frameSamples := samplesRead - offset
+				if frameSamples < frameSize {
+					// Pad the last frame if it's smaller than expected
+					frameData := make([]int16, frameSize)
+					copy(frameData, pcmBuffer[offset:end])
+					// Fill remaining samples with silence
+					for i := frameSamples; i < frameSize; i++ {
+						frameData[i] = 0
 					}
 
-				case <-c.stopChan:
-					c.logger.Debug("Stop signal received while sending frame", contextFields)
-					return
-				case <-c.ctx.Done():
-					c.logger.Debug("Context cancelled while sending frame", contextFields)
-					return
-				default:
-					// Discord send channel is full - this indicates potential issues
-					// Skip this frame but log the occurrence
-					c.logger.Warn("Discord send channel full, skipping frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+					// Encode the padded frame
+					opusData, err := c.audioEncoder.Encode(frameData)
+					if err != nil {
+						errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
+						errorContextFields["samples_count"] = frameSize
+						errorContextFields["frame_number"] = framesProcessed
+						errorContextFields["is_padded"] = true
+
+						c.logger.Error("Encoding error on padded frame", err, errorContextFields)
+						c.handlePlaybackError(err, "encoding")
+						return
+					}
+
+					// Send to Discord
+					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+						return
+					}
+
+					// Small delay to match Discord's processing rate (20ms frames)
+					time.Sleep(1 * time.Millisecond)
+				} else {
+					// Full frame - encode directly
+					opusData, err := c.audioEncoder.Encode(pcmBuffer[offset:end])
+					if err != nil {
+						errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
+						errorContextFields["samples_count"] = frameSize
+						errorContextFields["frame_number"] = framesProcessed
+
+						c.logger.Error("Encoding error", err, errorContextFields)
+						c.handlePlaybackError(err, "encoding")
+						return
+					}
+
+					// Send to Discord
+					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+						return
+					}
+
+					// Small delay to match Discord's processing rate (20ms frames)
+					time.Sleep(1 * time.Millisecond)
 				}
-			} else {
-				// Voice connection is not available
-				c.logger.Error("Voice connection unavailable", nil, CreateContextFieldsWithComponent(guildID, "", url, "voice_connection"))
-				c.handlePlaybackError(fmt.Errorf("voice connection lost"), "voice_connection")
-				return
 			}
 		}
+	}
+}
+
+// sendFrameToDiscord sends a single encoded frame to Discord voice connection
+// Returns false if the operation should stop (due to stop signal, context cancellation, or error)
+func (c *AudioPipelineController) sendFrameToDiscord(opusData []byte, framesProcessed *int, streamStartTime time.Time, guildID, url string) bool {
+	// Send encoded audio to Discord voice connection
+	if c.voiceConn != nil && c.voiceConn.OpusSend != nil {
+		// Add flow control to prevent overwhelming Discord's buffer
+		// Wait for channel space with timeout to maintain real-time streaming
+		select {
+		case c.voiceConn.OpusSend <- opusData:
+			// Successfully sent frame
+			*framesProcessed++
+
+			// Log progress much less frequently (every 500 frames = ~10 seconds)
+			if *framesProcessed%500 == 0 {
+				progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
+				progressFields["frames_processed"] = *framesProcessed
+				progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
+				c.logger.Info("Streaming progress", progressFields)
+			}
+			return true
+
+		case <-c.stopChan:
+			c.logger.Debug("Stop signal received while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+			return false
+		case <-c.ctx.Done():
+			c.logger.Debug("Context cancelled while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+			return false
+		case <-time.After(50 * time.Millisecond): // Wait up to 50ms for channel space
+			// Discord send channel is full - wait a bit and try again
+			// This prevents overwhelming Discord while maintaining smooth playback
+			select {
+			case c.voiceConn.OpusSend <- opusData:
+				// Successfully sent frame after waiting
+				*framesProcessed++
+				return true
+			default:
+				// Still full after waiting - skip this frame to prevent buildup
+				// Only log occasionally to avoid spam
+				if *framesProcessed%100 == 0 {
+					c.logger.Warn("Discord send channel persistently full, skipping frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+				}
+				return true // Continue processing
+			}
+		}
+	} else {
+		// Voice connection is not available
+		c.logger.Error("Voice connection unavailable", nil, CreateContextFieldsWithComponent(guildID, "", url, "voice_connection"))
+		c.handlePlaybackError(fmt.Errorf("voice connection lost"), "voice_connection")
+		return false
 	}
 }
 

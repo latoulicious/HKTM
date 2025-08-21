@@ -966,7 +966,7 @@ func (beh *BasicErrorHandler) extractNetworkErrorDetails(err error) map[string]i
 
 	if netErr, ok := err.(net.Error); ok {
 		details["timeout"] = netErr.Timeout()
-		details["temporary"] = netErr.Temporary()
+		details["temporary"] = isTemporaryFileSystemError(err.Error())
 	}
 
 	errorStr := strings.ToLower(err.Error())

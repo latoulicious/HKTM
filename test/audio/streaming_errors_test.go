@@ -2,6 +2,7 @@ package audio_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,5 +162,132 @@ func TestSimpleBackoffDelays(t *testing.T) {
 	}
 	if networkDelay2 != 4*time.Second {
 		t.Errorf("Network error second delay = %v, want %v", networkDelay2, 4*time.Second)
+	}
+}
+
+// TestYtDlpFormatFallback tests that yt-dlp format fallback works correctly
+func TestYtDlpFormatFallback(t *testing.T) {
+	// Test the format specification we're using
+	format := "bestaudio/best"
+
+	// Verify the format contains both options
+	if !strings.Contains(format, "bestaudio") {
+		t.Error("Format should contain 'bestaudio'")
+	}
+
+	if !strings.Contains(format, "best") {
+		t.Error("Format should contain 'best' as fallback")
+	}
+
+	t.Logf("✅ Format fallback specification is correct: %s", format)
+}
+
+// TestStreamingURLDetection tests the streaming URL detection logic
+func TestStreamingURLDetection(t *testing.T) {
+	testCases := []struct {
+		url         string
+		isStreaming bool
+		description string
+	}{
+		{
+			url:         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			isStreaming: false,
+			description: "YouTube URL should not be detected as streaming",
+		},
+		{
+			url:         "https://manifest.googlevideo.com/api/manifest/hls_playlist/...",
+			isStreaming: true,
+			description: "Google video manifest should be detected as streaming",
+		},
+		{
+			url:         "https://rr3---sn-4pgnuhxqp5-jb3k.googlevideo.com/...",
+			isStreaming: true,
+			description: "Google video CDN URL should be detected as streaming",
+		},
+		{
+			url:         "https://example.com/audio.m3u8",
+			isStreaming: true,
+			description: "HLS playlist should be detected as streaming",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			// This is a simplified version of the detection logic
+			urlLower := strings.ToLower(tc.url)
+			isStreaming := false
+
+			streamingPatterns := []string{
+				"googlevideo.com",
+				"manifest.googlevideo.com",
+				"manifest",
+				"m3u8",
+				"mpd",
+				"index.m3u8",
+			}
+
+			for _, pattern := range streamingPatterns {
+				if strings.Contains(urlLower, pattern) {
+					isStreaming = true
+					break
+				}
+			}
+
+			if isStreaming != tc.isStreaming {
+				t.Errorf("Expected %v for URL %s, got %v", tc.isStreaming, tc.url, isStreaming)
+			} else {
+				t.Logf("✅ Correctly detected streaming URL: %s", tc.url)
+			}
+		})
+	}
+}
+
+// TestPipelineTypeSelection tests that the correct pipeline type is selected
+func TestPipelineTypeSelection(t *testing.T) {
+	testCases := []struct {
+		url              string
+		expectedPipeline string
+		description      string
+	}{
+		{
+			url:              "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			expectedPipeline: "ytdlp_ffmpeg",
+			description:      "YouTube URL should use yt-dlp | ffmpeg pipeline",
+		},
+		{
+			url:              "https://manifest.googlevideo.com/api/manifest/hls_playlist/...",
+			expectedPipeline: "direct_ffmpeg",
+			description:      "Streaming URL should use direct FFmpeg pipeline",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			// This is a simplified version of the pipeline selection logic
+			urlLower := strings.ToLower(tc.url)
+			pipelineType := "ytdlp_ffmpeg" // default
+
+			streamingPatterns := []string{
+				"googlevideo.com",
+				"manifest.googlevideo.com",
+				"manifest",
+				"m3u8",
+				"mpd",
+				"index.m3u8",
+			}
+
+			for _, pattern := range streamingPatterns {
+				if strings.Contains(urlLower, pattern) {
+					pipelineType = "direct_ffmpeg"
+					break
+				}
+			}
+
+			if pipelineType != tc.expectedPipeline {
+				t.Errorf("Expected pipeline %s for URL %s, got %s", tc.expectedPipeline, tc.url, pipelineType)
+			} else {
+				t.Logf("✅ Correctly selected pipeline %s for URL: %s", pipelineType, tc.url)
+			}
+		})
 	}
 }

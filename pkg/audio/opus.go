@@ -21,7 +21,7 @@ type OpusProcessor struct {
 func NewOpusProcessor(config *OpusConfig, logger AudioLogger) AudioEncoder {
 	// Create pipeline-specific logger for Opus encoding operations
 	pipelineLogger := logger.WithPipeline("opus")
-	
+
 	return &OpusProcessor{
 		config: config,
 		logger: pipelineLogger,
@@ -116,10 +116,10 @@ func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 
 	if len(pcmData) != expectedFrameSize {
 		op.logger.Error("Invalid PCM frame size", nil, map[string]interface{}{
-			"expected_samples":     expectedFrameSize,
-			"received_samples":     len(pcmData),
+			"expected_samples":       expectedFrameSize,
+			"received_samples":       len(pcmData),
 			"frame_size_per_channel": op.config.FrameSize,
-			"channels":             channels,
+			"channels":               channels,
 		})
 		return nil, fmt.Errorf("invalid PCM frame size: expected %d samples (%d per channel * %d channels), got %d",
 			expectedFrameSize, op.config.FrameSize, channels, len(pcmData))
@@ -143,9 +143,9 @@ func (op *OpusProcessor) Encode(pcmData []int16) ([]byte, error) {
 	if err != nil {
 		// Provide detailed error context for debugging
 		op.logger.Error("Failed to encode PCM to Opus", err, map[string]interface{}{
-			"frame_size":   op.config.FrameSize,
-			"pcm_samples":  len(pcmData),
-			"bitrate":      op.config.Bitrate,
+			"frame_size":  op.config.FrameSize,
+			"pcm_samples": len(pcmData),
+			"bitrate":     op.config.Bitrate,
 		})
 		return nil, fmt.Errorf("failed to encode PCM to Opus (frame_size=%d, samples=%d, bitrate=%d): %w",
 			op.config.FrameSize, len(pcmData), op.config.Bitrate, err)
@@ -217,13 +217,8 @@ func (op *OpusProcessor) GetConfig() *OpusConfig {
 // EncodeFrame encodes a single PCM frame with Discord-specific validation
 // This method ensures proper frame timing for Discord streaming (20ms frames)
 func (op *OpusProcessor) EncodeFrame(pcmFrame []int16) ([]byte, error) {
-	// Add pipeline context for frame encoding
-	op.logger.Debug("Encoding single PCM frame", map[string]interface{}{
-		"frame_samples": len(pcmFrame),
-		"operation":     "encode_frame",
-	})
-	
 	// Use the main Encode method with additional frame validation
+	// Note: Debug logging removed to prevent database bottleneck
 	return op.Encode(pcmFrame)
 }
 

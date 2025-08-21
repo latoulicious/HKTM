@@ -44,7 +44,7 @@ ffmpeg:
 # yt-dlp specific settings
 ytdlp:
   binary_path: "yt-dlp"
-  format: "bestaudio"               # Get best audio quality
+  format: "bestaudio/best"          # Get best audio quality with fallback to best
   timeout: 30
   extract_flat: false               # Get full metadata
   quiet: true                       # Reduce output noise
