@@ -481,6 +481,13 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	frameBytes := frameSize * 2
 	leftover := make([]byte, 0, frameBytes)
 
+	// Ticker for pacing frame sends to Discord
+	ticker := time.NewTicker(frameDuration)
+	defer func() {
+		ticker.Stop()
+		drainTicker(ticker)
+	}()
+
 	contextFields["frame_size"] = frameSize
 	contextFields["batch_size"] = batchSize
 	contextFields["batch_frame_size"] = batchFrameSize
@@ -535,10 +542,9 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 					return
 				}
 
-				if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+				if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url, ticker) {
 					return
 				}
-				time.Sleep(1 * time.Millisecond)
 			}
 
 			leftoverSamples := totalSamples - fullFrames*frameSize
@@ -564,10 +570,9 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 						return
 					}
 
-					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url, ticker) {
 						return
 					}
-					time.Sleep(1 * time.Millisecond)
 				}
 
 				streamDuration := time.Since(streamStartTime)
@@ -615,53 +620,60 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 
 // sendFrameToDiscord sends a single encoded frame to Discord voice connection
 // Returns false if the operation should stop (due to stop signal, context cancellation, or error)
-func (c *AudioPipelineController) sendFrameToDiscord(opusData []byte, framesProcessed *int, streamStartTime time.Time, guildID, url string) bool {
+func (c *AudioPipelineController) sendFrameToDiscord(opusData []byte, framesProcessed *int, streamStartTime time.Time, guildID, url string, ticker *time.Ticker) bool {
 	// Send encoded audio to Discord voice connection
 	if c.voiceConn != nil && c.voiceConn.OpusSend != nil {
-		// Add flow control to prevent overwhelming Discord's buffer
-		// Wait for channel space with timeout to maintain real-time streaming
-		select {
-		case c.voiceConn.OpusSend <- opusData:
-			// Successfully sent frame
-			*framesProcessed++
-
-			// Log progress much less frequently (every 500 frames = ~10 seconds)
-			if *framesProcessed%500 == 0 {
-				progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
-				progressFields["frames_processed"] = *framesProcessed
-				progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
-				c.logger.Info("Streaming progress", progressFields)
-			}
-			return true
-
-		case <-c.stopChan:
-			c.logger.Debug("Stop signal received while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
-			return false
-		case <-c.ctx.Done():
-			c.logger.Debug("Context cancelled while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
-			return false
-		case <-time.After(50 * time.Millisecond): // Wait up to 50ms for channel space
-			// Discord send channel is full - wait a bit and try again
-			// This prevents overwhelming Discord while maintaining smooth playback
+		for {
 			select {
-			case c.voiceConn.OpusSend <- opusData:
-				// Successfully sent frame after waiting
-				*framesProcessed++
-				return true
-			default:
-				// Still full after waiting - skip this frame to prevent buildup
-				// Only log occasionally to avoid spam
-				if *framesProcessed%100 == 0 {
-					c.logger.Warn("Discord send channel persistently full, skipping frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+			case <-c.stopChan:
+				drainTicker(ticker)
+				c.logger.Debug("Stop signal received while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+				return false
+			case <-c.ctx.Done():
+				drainTicker(ticker)
+				c.logger.Debug("Context cancelled while sending frame", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+				return false
+			case <-ticker.C:
+				select {
+				case c.voiceConn.OpusSend <- opusData:
+					// Successfully sent frame
+					*framesProcessed++
+
+					// Log progress much less frequently (every 500 frames = ~10 seconds)
+					if *framesProcessed%500 == 0 {
+						progressFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_progress")
+						progressFields["frames_processed"] = *framesProcessed
+						progressFields["elapsed_time"] = FormatDuration(time.Since(streamStartTime))
+						c.logger.Info("Streaming progress", progressFields)
+					}
+					return true
+				default:
+					// Discord send channel is full - retry on next tick
+					if *framesProcessed%100 == 0 {
+						c.logger.Warn("Discord send channel full, retrying", CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+					}
 				}
-				return true // Continue processing
 			}
 		}
-	} else {
-		// Voice connection is not available
-		c.logger.Error("Voice connection unavailable", nil, CreateContextFieldsWithComponent(guildID, "", url, "voice_connection"))
-		c.handlePlaybackError(fmt.Errorf("voice connection lost"), "voice_connection")
-		return false
+	}
+
+	// Voice connection is not available
+	c.logger.Error("Voice connection unavailable", nil, CreateContextFieldsWithComponent(guildID, "", url, "voice_connection"))
+	c.handlePlaybackError(fmt.Errorf("voice connection lost"), "voice_connection")
+	return false
+}
+
+// drainTicker clears any pending ticks from the provided ticker
+func drainTicker(t *time.Ticker) {
+	if t == nil {
+		return
+	}
+	for {
+		select {
+		case <-t.C:
+		default:
+			return
+		}
 	}
 }
 
