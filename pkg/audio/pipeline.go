@@ -478,6 +478,8 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	batchFrameSize := frameSize * batchSize
 	pcmBuffer := make([]int16, batchFrameSize)
 	byteBuffer := make([]byte, batchFrameSize*2) // 2 bytes per int16 sample
+	frameBytes := frameSize * 2
+	leftover := make([]byte, 0, frameBytes)
 
 	contextFields["frame_size"] = frameSize
 	contextFields["batch_size"] = batchSize
@@ -501,30 +503,98 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 			c.logger.Debug("Context cancelled, ending stream", contextFields)
 			return
 		default:
-			// Read PCM data from stream processor
-			n, err := stream.Read(byteBuffer)
-			if err != nil {
-				if err == io.EOF {
-					// Normal stream completion
-					streamDuration := time.Since(streamStartTime)
-					endContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_end")
-					endContextFields["frames_processed"] = framesProcessed
-					endContextFields["bytes_processed"] = bytesProcessed
-					endContextFields["stream_duration"] = FormatDuration(streamDuration)
+			// Shift any leftover bytes to the beginning of the buffer
+			copy(byteBuffer, leftover)
+			n, err := stream.Read(byteBuffer[len(leftover):])
 
-					c.logger.Info("Stream ended normally", endContextFields)
-					c.handleStreamEnd()
+			// Skip empty reads
+			if n == 0 && err == nil {
+				continue
+			}
+
+			bytesProcessed += n
+
+			totalBytes := n + len(leftover)
+			totalSamples := totalBytes / 2
+			for i := 0; i < totalSamples; i++ {
+				pcmBuffer[i] = int16(byteBuffer[i*2]) | int16(byteBuffer[i*2+1])<<8
+			}
+
+			fullFrames := totalSamples / frameSize
+			for f := 0; f < fullFrames; f++ {
+				start := f * frameSize
+				end := start + frameSize
+				opusData, err := c.audioEncoder.Encode(pcmBuffer[start:end])
+				if err != nil {
+					errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
+					errorContextFields["samples_count"] = frameSize
+					errorContextFields["frame_number"] = framesProcessed
+
+					c.logger.Error("Encoding error", err, errorContextFields)
+					c.handlePlaybackError(err, "encoding")
 					return
 				}
 
-				// Stream read error - provide extra context for first read failure
+				if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+					return
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+
+			leftoverSamples := totalSamples - fullFrames*frameSize
+			leftoverBytes := leftoverSamples * 2
+
+			if err == io.EOF {
+				if leftoverSamples > 0 {
+					frameData := make([]int16, frameSize)
+					copy(frameData, pcmBuffer[fullFrames*frameSize:totalSamples])
+					for i := leftoverSamples; i < frameSize; i++ {
+						frameData[i] = 0
+					}
+
+					opusData, encErr := c.audioEncoder.Encode(frameData)
+					if encErr != nil {
+						errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
+						errorContextFields["samples_count"] = frameSize
+						errorContextFields["frame_number"] = framesProcessed
+						errorContextFields["is_padded"] = true
+
+						c.logger.Error("Encoding error on padded frame", encErr, errorContextFields)
+						c.handlePlaybackError(encErr, "encoding")
+						return
+					}
+
+					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
+						return
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+
+				streamDuration := time.Since(streamStartTime)
+				endContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_end")
+				endContextFields["frames_processed"] = framesProcessed
+				endContextFields["bytes_processed"] = bytesProcessed
+				endContextFields["stream_duration"] = FormatDuration(streamDuration)
+
+				c.logger.Info("Stream ended normally", endContextFields)
+				c.handleStreamEnd()
+				return
+			}
+
+			if leftoverBytes > 0 {
+				leftover = leftover[:leftoverBytes]
+				copy(leftover, byteBuffer[fullFrames*frameSize*2:totalBytes])
+			} else {
+				leftover = leftover[:0]
+			}
+
+			if err != nil {
 				errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream_read")
 				errorContextFields["frames_processed"] = framesProcessed
 				errorContextFields["bytes_processed"] = bytesProcessed
 				errorContextFields["is_first_read"] = framesProcessed == 0 && bytesProcessed == 0
 				errorContextFields["time_since_start"] = FormatDuration(time.Since(streamStartTime))
 
-				// Check if FFmpeg process is still alive
 				if c.streamProcessor != nil {
 					errorContextFields["ffmpeg_running"] = c.streamProcessor.IsRunning()
 					errorContextFields["ffmpeg_alive"] = c.streamProcessor.IsProcessAlive()
@@ -538,81 +608,6 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 				}
 				c.handlePlaybackError(err, "stream_read")
 				return
-			}
-
-			// Skip empty reads
-			if n == 0 {
-				continue
-			}
-
-			bytesProcessed += n
-
-			// Convert bytes to int16 PCM samples (little-endian)
-			samplesRead := n / 2
-			for i := 0; i < samplesRead; i++ {
-				pcmBuffer[i] = int16(byteBuffer[i*2]) | int16(byteBuffer[i*2+1])<<8
-			}
-
-			// Process audio in individual 20ms frames for Discord compatibility
-			// Each frame must be exactly 960 samples (20ms at 48kHz stereo)
-			for offset := 0; offset < samplesRead; offset += frameSize {
-				end := offset + frameSize
-				if end > samplesRead {
-					end = samplesRead
-				}
-
-				// Get current frame data
-				frameSamples := samplesRead - offset
-				if frameSamples < frameSize {
-					// Pad the last frame if it's smaller than expected
-					frameData := make([]int16, frameSize)
-					copy(frameData, pcmBuffer[offset:end])
-					// Fill remaining samples with silence
-					for i := frameSamples; i < frameSize; i++ {
-						frameData[i] = 0
-					}
-
-					// Encode the padded frame
-					opusData, err := c.audioEncoder.Encode(frameData)
-					if err != nil {
-						errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
-						errorContextFields["samples_count"] = frameSize
-						errorContextFields["frame_number"] = framesProcessed
-						errorContextFields["is_padded"] = true
-
-						c.logger.Error("Encoding error on padded frame", err, errorContextFields)
-						c.handlePlaybackError(err, "encoding")
-						return
-					}
-
-					// Send to Discord
-					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
-						return
-					}
-
-					// Small delay to match Discord's processing rate (20ms frames)
-					time.Sleep(1 * time.Millisecond)
-				} else {
-					// Full frame - encode directly
-					opusData, err := c.audioEncoder.Encode(pcmBuffer[offset:end])
-					if err != nil {
-						errorContextFields := CreateContextFieldsWithComponent(guildID, "", url, "encoding")
-						errorContextFields["samples_count"] = frameSize
-						errorContextFields["frame_number"] = framesProcessed
-
-						c.logger.Error("Encoding error", err, errorContextFields)
-						c.handlePlaybackError(err, "encoding")
-						return
-					}
-
-					// Send to Discord
-					if !c.sendFrameToDiscord(opusData, &framesProcessed, streamStartTime, guildID, url) {
-						return
-					}
-
-					// Small delay to match Discord's processing rate (20ms frames)
-					time.Sleep(1 * time.Millisecond)
-				}
 			}
 		}
 	}
