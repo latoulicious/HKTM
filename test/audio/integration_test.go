@@ -147,7 +147,7 @@ func TestYtDlpPipingWithRealURL(t *testing.T) {
 
 	go func() {
 		var err error
-		reader, err = processor.StartStream(testURL)
+		reader, err = processor.StartStream(ctx, testURL)
 		done <- err
 	}()
 
@@ -409,7 +409,7 @@ func TestManualYouTubeURLs(t *testing.T) {
 
 			go func() {
 				var err error
-				reader, err = processor.StartStream(testCase.url)
+				reader, err = processor.StartStream(ctx, testCase.url)
 				done <- err
 			}()
 
@@ -519,7 +519,7 @@ func TestStreamingPipelineRobustness(t *testing.T) {
 	t.Run("invalid_url", func(t *testing.T) {
 		invalidURL := "https://invalid-url-that-does-not-exist.com/test"
 
-		_, err := processor.StartStream(invalidURL)
+		_, err := processor.StartStream(context.Background(), invalidURL)
 		if err == nil {
 			t.Error("Expected error for invalid URL")
 		} else {
@@ -539,7 +539,7 @@ func TestStreamingPipelineRobustness(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			t.Logf("Cycle %d: Starting stream", i+1)
 
-			reader, err := processor.StartStream(testURL)
+			reader, err := processor.StartStream(context.Background(), testURL)
 			if err != nil {
 				t.Logf("Cycle %d failed to start: %v", i+1, err)
 				continue
@@ -575,7 +575,7 @@ func TestStreamingPipelineRobustness(t *testing.T) {
 		}
 
 		testURL := "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-		reader, err := processor.StartStream(testURL)
+		reader, err := processor.StartStream(context.Background(), testURL)
 		if err != nil {
 			t.Logf("Failed to start for process info test: %v", err)
 			return

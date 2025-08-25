@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -24,11 +25,11 @@ type AudioPipeline interface {
 
 // StreamProcessor handles the FFmpeg process and audio stream generation
 type StreamProcessor interface {
-	StartStream(url string) (io.ReadCloser, error)
+	StartStream(ctx context.Context, url string) (io.ReadCloser, error)
 	Stop() error
 	IsRunning() bool
 	IsProcessAlive() bool
-	Restart(url string) error
+	Restart(ctx context.Context, url string) error
 	WaitForExit(timeout time.Duration) error
 	GetProcessInfo() map[string]interface{}
 

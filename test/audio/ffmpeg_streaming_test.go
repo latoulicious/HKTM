@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -79,7 +80,7 @@ func TestFFmpegRetryLogic(t *testing.T) {
 	// Test with invalid URL to trigger retry logic
 	invalidURL := "https://invalid-url-that-should-fail.com/test"
 
-	_, err := processor.StartStream(invalidURL)
+	_, err := processor.StartStream(context.Background(), invalidURL)
 
 	// We expect an error for invalid URL, but let's be more flexible about what error we get
 	// The important thing is that the retry logic is implemented

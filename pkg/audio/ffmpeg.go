@@ -17,6 +17,9 @@ type FFmpegProcessor struct {
 	config          *FFmpegConfig
 	ytdlpConfig     *YtDlpConfig
 	streamingConfig *StreamingConfig
+	parentCtx       context.Context
+	ctx             context.Context
+	cancelFunc      context.CancelFunc
 	cmd             *exec.Cmd
 	ytdlpCmd        *exec.Cmd // yt-dlp process for piping
 	outputPipe      io.ReadCloser
@@ -59,9 +62,12 @@ func NewFFmpegProcessor(config *FFmpegConfig, ytdlpConfig *YtDlpConfig, streamin
 }
 
 // StartStream starts the yt-dlp | FFmpeg pipeline for the given URL
-func (fp *FFmpegProcessor) StartStream(url string) (io.ReadCloser, error) {
+func (fp *FFmpegProcessor) StartStream(ctx context.Context, url string) (io.ReadCloser, error) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
+
+	fp.parentCtx = ctx
+	fp.ctx, fp.cancelFunc = context.WithCancel(ctx)
 
 	// Create pipeline-specific logger with URL context
 	urlLogger := fp.pipelineLogger
@@ -198,7 +204,7 @@ func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger Audio
 	if ffmpegPath == "" {
 		ffmpegPath = fp.config.BinaryPath
 	}
-	fp.cmd = exec.Command(ffmpegPath, ffmpegArgs...)
+	fp.cmd = exec.CommandContext(fp.ctx, ffmpegPath, ffmpegArgs...)
 
 	// Set up process groups for proper cleanup
 	fp.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -270,7 +276,7 @@ func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioL
 		return nil, fmt.Errorf("yt-dlp not found at path '%s': %w", ytdlpPath, err)
 	}
 
-	fp.ytdlpCmd = exec.Command(ytdlpPath, ytdlpArgs...)
+	fp.ytdlpCmd = exec.CommandContext(fp.ctx, ytdlpPath, ytdlpArgs...)
 
 	// Build FFmpeg command: ffmpeg -i pipe:0 [options] pipe:1
 	ffmpegArgs := fp.buildFFmpegPipeArgs()
@@ -279,7 +285,7 @@ func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioL
 	if ffmpegPath == "" {
 		ffmpegPath = fp.config.BinaryPath
 	}
-	fp.cmd = exec.Command(ffmpegPath, ffmpegArgs...)
+	fp.cmd = exec.CommandContext(fp.ctx, ffmpegPath, ffmpegArgs...)
 
 	// Set up process groups for proper cleanup
 	fp.ytdlpCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -511,9 +517,11 @@ func (fp *FFmpegProcessor) stopInternal() error {
 		fp.ytdlpErrorPipe = nil
 	}
 
-	// Stop both processes with timeout
-	fp.stopProcessWithTimeout(fp.cmd, "ffmpeg")
-	fp.stopProcessWithTimeout(fp.ytdlpCmd, "yt-dlp")
+	if fp.cancelFunc != nil {
+		fp.cancelFunc()
+		fp.cancelFunc = nil
+	}
+	fp.ctx = nil
 
 	// Signal that the processes have exited
 	if fp.processExited != nil {
@@ -536,43 +544,6 @@ func (fp *FFmpegProcessor) stopInternal() error {
 	return nil
 }
 
-// stopProcessWithTimeout stops a process with graceful termination and timeout
-func (fp *FFmpegProcessor) stopProcessWithTimeout(cmd *exec.Cmd, processName string) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-
-	contextFields := CreateContextFieldsWithComponent("", "", fp.currentURL, "ffmpeg")
-	contextFields["process"] = processName
-
-	// Try graceful termination first
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		contextFields["error"] = err.Error()
-		fp.pipelineLogger.Warn("Failed to send SIGTERM to process group", contextFields)
-	}
-
-	// Wait for graceful shutdown with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case <-done:
-		// Process terminated gracefully
-		fp.pipelineLogger.Debug("Process terminated gracefully", contextFields)
-	case <-time.After(5 * time.Second):
-		// Force kill if graceful shutdown takes too long
-		contextFields["recent_stderr"] = fp.getRecentStderr()
-		fp.pipelineLogger.Warn("Process did not terminate gracefully, force killing", contextFields)
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			contextFields["kill_error"] = err.Error()
-			fp.pipelineLogger.Error("Failed to force kill process group", err, contextFields)
-		}
-		<-done // Wait for the process to actually exit
-	}
-}
-
 // IsRunning returns whether the FFmpeg process is currently running
 func (fp *FFmpegProcessor) IsRunning() bool {
 	fp.mu.RLock()
@@ -581,7 +552,7 @@ func (fp *FFmpegProcessor) IsRunning() bool {
 }
 
 // Restart stops the current stream and starts a new one with the given URL
-func (fp *FFmpegProcessor) Restart(url string) error {
+func (fp *FFmpegProcessor) Restart(ctx context.Context, url string) error {
 	contextFields := CreateContextFieldsWithComponent("", "", url, "ffmpeg")
 	contextFields["old_url"] = fp.currentURL
 	fp.pipelineLogger.Info("Restarting FFmpeg stream", contextFields)
@@ -593,7 +564,7 @@ func (fp *FFmpegProcessor) Restart(url string) error {
 	}
 
 	// Start new stream
-	_, err := fp.StartStream(url)
+	_, err := fp.StartStream(ctx, url)
 	return err
 }
 
@@ -1194,6 +1165,7 @@ func (fp *FFmpegProcessor) restartWithFreshURL(logger AudioLogger) error {
 	}
 
 	// Start new pipeline with fresh URL
+	fp.ctx, fp.cancelFunc = context.WithCancel(fp.parentCtx)
 	_, err := fp.startPipeline(fp.streamURL, logger)
 	return err
 }

@@ -385,7 +385,7 @@ func (c *AudioPipelineController) executePlayback(url string, voiceConn *discord
 
 	// Step 3: Start the stream processor
 	c.logger.Debug("Starting stream processor", contextFields)
-	stream, err := c.streamProcessor.StartStream(url)
+	stream, err := c.streamProcessor.StartStream(c.ctx, url)
 	if err != nil {
 		c.logger.Error("Stream processor start failed", err, contextFields)
 		return c.handlePlaybackError(err, "stream_start")
