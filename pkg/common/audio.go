@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -209,14 +210,14 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 
 	ap.ffmpegCmd = cmd
 
-	// Capture stderr for debugging
+	// Capture stderr for debugging and readiness detection
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 
-	// Start stderr consumer to prevent blocking
-	go ap.consumeStderr(stderrPipe)
+	readyCh := make(chan struct{}, 1)
+	go ap.consumeStderr(stderrPipe, readyCh)
 
 	// Get stdout pipe
 	stdout, err := cmd.StdoutPipe()
@@ -224,20 +225,47 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 		return fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 
+	bufReader := bufio.NewReader(stdout)
+
 	// Start FFmpeg
 	log.Println("Starting FFmpeg process...")
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start ffmpeg: %v", err)
 	}
 
-	// Wait a moment for FFmpeg to start and check if it's still running
-	time.Sleep(1 * time.Second)
-	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-		exitCode := cmd.ProcessState.ExitCode()
-		if exitCode == 1 {
-			return fmt.Errorf("ffmpeg failed to start - likely invalid stream URL or network issue")
+	// Wait for FFmpeg to become ready by checking stderr marker or output data
+	startDeadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for !ready {
+		if bufReader.Buffered() > 0 {
+			break
 		}
-		return fmt.Errorf("ffmpeg process exited immediately after start with code %d", exitCode)
+
+		select {
+		case <-readyCh:
+			ready = true
+		default:
+		}
+
+		if ready {
+			break
+		}
+
+		if time.Now().After(startDeadline) {
+			cmd.Process.Kill()
+			cmd.Wait()
+			return fmt.Errorf("ffmpeg readiness timeout")
+		}
+
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			exitCode := cmd.ProcessState.ExitCode()
+			if exitCode == 1 {
+				return fmt.Errorf("ffmpeg failed to start - likely invalid stream URL or network issue")
+			}
+			return fmt.Errorf("ffmpeg process exited immediately after start with code %d", exitCode)
+		}
+
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Ensure process cleanup
@@ -270,7 +298,7 @@ func (ap *AudioPipeline) streamAudio(streamURL string) error {
 	log.Println("Starting audio stream to Discord...")
 
 	// Stream audio with proper buffering and error handling
-	return ap.streamPCMToDiscord(stdout)
+	return ap.streamPCMToDiscord(bufReader)
 }
 
 // Audio frame constants
@@ -486,7 +514,7 @@ func (ap *AudioPipeline) waitForVoiceReady() error {
 	}
 }
 
-func (ap *AudioPipeline) consumeStderr(stderr io.ReadCloser) {
+func (ap *AudioPipeline) consumeStderr(stderr io.ReadCloser, readyCh chan struct{}) {
 	defer stderr.Close()
 	buffer := make([]byte, 1024)
 	for {
@@ -495,8 +523,17 @@ func (ap *AudioPipeline) consumeStderr(stderr io.ReadCloser) {
 			return
 		}
 		if n > 0 {
-			// Log FFmpeg stderr for debugging, but only if it contains errors
 			output := string(buffer[:n])
+
+			// Detect readiness marker
+			if strings.Contains(strings.ToLower(output), "press [q] to stop") {
+				select {
+				case readyCh <- struct{}{}:
+				default:
+				}
+			}
+
+			// Log FFmpeg stderr for debugging, but only if it contains errors
 			if strings.Contains(strings.ToLower(output), "error") ||
 				strings.Contains(strings.ToLower(output), "failed") ||
 				strings.Contains(strings.ToLower(output), "timeout") {
