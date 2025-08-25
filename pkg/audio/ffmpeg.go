@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"os/exec"
 	"strings"
 	"sync"
@@ -104,6 +105,12 @@ func (fp *FFmpegProcessor) startStreamWithRetry(ctx context.Context, url string,
 		contextFields["max_attempts"] = fp.maxRetries + 1
 
 		if attempt > 0 {
+			baseDelay := time.Second
+			expDelay := baseDelay * time.Duration(1<<attempt)
+			r := rand.New(rand.NewSource(time.Now().UnixNano()))
+			jitter := time.Duration(r.Int63n(int64(baseDelay)))
+			delay := expDelay + jitter
+			contextFields["backoff_delay"] = delay.String()
 			urlLogger.Info("Retrying stream start", contextFields)
 
 			// Check if failure might be due to URL expiry and try refresh (Requirement 8.2, 6.1)
@@ -122,8 +129,6 @@ func (fp *FFmpegProcessor) startStreamWithRetry(ctx context.Context, url string,
 				}
 			}
 
-			// Simple delay between retries: 2s, 5s, 10s (Requirement 6.1)
-			delay := time.Duration(2+attempt*3) * time.Second
 			time.Sleep(delay)
 		} else {
 			urlLogger.Info("Starting streaming pipeline", contextFields)
