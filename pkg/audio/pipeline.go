@@ -620,7 +620,16 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 
 // sendFrameToDiscord sends a single encoded frame to Discord voice connection
 // Returns false if the operation should stop (due to stop signal, context cancellation, or error)
-func (c *AudioPipelineController) sendFrameToDiscord(opusData []byte, framesProcessed *int, streamStartTime time.Time, guildID, url string, ticker *time.Ticker) bool {
+func (c *AudioPipelineController) sendFrameToDiscord(opusData []byte, framesProcessed *int, streamStartTime time.Time, guildID, url string, ticker *time.Ticker) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic sending frame to Discord: %v", r)
+			c.logger.Error("Recovered panic while sending frame to Discord", err, CreateContextFieldsWithComponent(guildID, "", url, "discord_send"))
+			c.handlePlaybackError(err, "discord_send")
+			ok = false
+		}
+	}()
+
 	// Send encoded audio to Discord voice connection
 	if c.voiceConn != nil && c.voiceConn.OpusSend != nil {
 		for {
