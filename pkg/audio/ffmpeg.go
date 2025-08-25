@@ -89,11 +89,11 @@ func (fp *FFmpegProcessor) StartStream(ctx context.Context, url string) (io.Read
 	}
 
 	// Start the streaming pipeline with retry logic
-	return fp.startStreamWithRetry(fp.streamURL, urlLogger)
+	return fp.startStreamWithRetry(fp.ctx, fp.streamURL, urlLogger)
 }
 
 // startStreamWithRetry attempts to start the streaming pipeline with retry logic
-func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+func (fp *FFmpegProcessor) startStreamWithRetry(ctx context.Context, url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= fp.maxRetries; attempt++ {
@@ -130,7 +130,7 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 		}
 
 		// Try to start the pipeline
-		reader, err := fp.startPipeline(url, urlLogger)
+		reader, err := fp.startPipeline(ctx, url, urlLogger)
 		if err == nil {
 			urlLogger.Info("Streaming pipeline started successfully", contextFields)
 			return reader, nil
@@ -156,14 +156,14 @@ func (fp *FFmpegProcessor) startStreamWithRetry(url string, urlLogger AudioLogge
 }
 
 // startPipeline starts the appropriate pipeline based on URL type
-func (fp *FFmpegProcessor) startPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+func (fp *FFmpegProcessor) startPipeline(ctx context.Context, url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	// Check if this is a streaming URL (from yt-dlp) or a YouTube URL
 	if fp.isStreamingURL(url) {
 		// For streaming URLs, use FFmpeg directly
-		return fp.startFFmpegDirectPipeline(url, urlLogger)
+		return fp.startFFmpegDirectPipeline(ctx, url, urlLogger)
 	} else {
 		// For YouTube URLs, use yt-dlp | ffmpeg pipeline
-		return fp.startYtdlpFFmpegPipeline(url, urlLogger)
+		return fp.startYtdlpFFmpegPipeline(ctx, url, urlLogger)
 	}
 }
 
@@ -196,7 +196,7 @@ func (fp *FFmpegProcessor) isStreamingURL(url string) bool {
 }
 
 // startFFmpegDirectPipeline starts FFmpeg directly with a streaming URL
-func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+func (fp *FFmpegProcessor) startFFmpegDirectPipeline(ctx context.Context, url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	// Build FFmpeg command for direct streaming URL
 	ffmpegArgs := fp.buildFFmpegDirectArgs(url)
 	// Prefer streaming config path, fall back to ffmpeg config path
@@ -204,7 +204,7 @@ func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger Audio
 	if ffmpegPath == "" {
 		ffmpegPath = fp.config.BinaryPath
 	}
-	fp.cmd = exec.CommandContext(fp.ctx, ffmpegPath, ffmpegArgs...)
+	fp.cmd = exec.CommandContext(ctx, ffmpegPath, ffmpegArgs...)
 
 	// Set up process groups for proper cleanup
 	fp.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -262,7 +262,7 @@ func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger Audio
 }
 
 // startYtdlpFFmpegPipeline starts the yt-dlp | ffmpeg pipeline for YouTube URLs
-func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioLogger) (io.ReadCloser, error) {
+func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(ctx context.Context, url string, urlLogger AudioLogger) (io.ReadCloser, error) {
 	// Build yt-dlp command: yt-dlp -o - [url]
 	ytdlpArgs := fp.buildYtdlpArgs(url)
 	// Prefer streaming config path, fall back to ytdlp config path
@@ -276,7 +276,7 @@ func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioL
 		return nil, fmt.Errorf("yt-dlp not found at path '%s': %w", ytdlpPath, err)
 	}
 
-	fp.ytdlpCmd = exec.CommandContext(fp.ctx, ytdlpPath, ytdlpArgs...)
+	fp.ytdlpCmd = exec.CommandContext(ctx, ytdlpPath, ytdlpArgs...)
 
 	// Build FFmpeg command: ffmpeg -i pipe:0 [options] pipe:1
 	ffmpegArgs := fp.buildFFmpegPipeArgs()
@@ -285,7 +285,7 @@ func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioL
 	if ffmpegPath == "" {
 		ffmpegPath = fp.config.BinaryPath
 	}
-	fp.cmd = exec.CommandContext(fp.ctx, ffmpegPath, ffmpegArgs...)
+	fp.cmd = exec.CommandContext(ctx, ffmpegPath, ffmpegArgs...)
 
 	// Set up process groups for proper cleanup
 	fp.ytdlpCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1166,7 +1166,7 @@ func (fp *FFmpegProcessor) restartWithFreshURL(logger AudioLogger) error {
 
 	// Start new pipeline with fresh URL
 	fp.ctx, fp.cancelFunc = context.WithCancel(fp.parentCtx)
-	_, err := fp.startPipeline(fp.streamURL, logger)
+	_, err := fp.startPipeline(fp.ctx, fp.streamURL, logger)
 	return err
 }
 
