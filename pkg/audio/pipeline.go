@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -436,9 +437,37 @@ func (c *AudioPipelineController) streamAudio(stream io.ReadCloser) {
 	contextFields := CreateContextFieldsWithComponent(guildID, "", url, "stream")
 	c.logger.Debug("Starting audio streaming loop", contextFields)
 
-	// Give FFmpeg a moment to initialize and start producing output
-	// This prevents immediate "file already closed" errors
-	time.Sleep(200 * time.Millisecond)
+	// Wait for FFmpeg to start producing data or context cancellation
+	startTimeout := c.config.GetStreamingConfig().StartTimeout
+	if startTimeout <= 0 {
+		startTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, startTimeout)
+	defer cancel()
+
+	ready := make(chan error, 1)
+	bufReader := bufio.NewReader(stream)
+	go func() {
+		_, err := bufReader.Peek(1)
+		ready <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		stream.Close()
+		c.logger.Warn("Timed out waiting for stream data", contextFields)
+		return
+	case err := <-ready:
+		if err != nil {
+			stream.Close()
+			c.logger.Error("Failed to read initial stream data", err, contextFields)
+			return
+		}
+	}
+	stream = struct {
+		io.Reader
+		io.Closer
+	}{bufReader, stream}
 
 	// Get optimal frame size from encoder
 	frameSize := c.audioEncoder.GetFrameSize()
