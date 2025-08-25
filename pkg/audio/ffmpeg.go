@@ -2,6 +2,7 @@ package audio
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -244,8 +245,12 @@ func (fp *FFmpegProcessor) startFFmpegDirectPipeline(url string, urlLogger Audio
 
 	urlLogger.Info("Direct FFmpeg pipeline started successfully", contextFields)
 
-	// Give the pipeline a moment to initialize
-	time.Sleep(100 * time.Millisecond)
+	// Wait for FFmpeg to produce output or timeout
+	ffmpegStdout, err = fp.waitForOutput(ffmpegStdout, urlLogger, contextFields)
+	if err != nil {
+		return nil, err
+	}
+	fp.outputPipe = ffmpegStdout
 
 	return ffmpegStdout, nil
 }
@@ -362,10 +367,52 @@ func (fp *FFmpegProcessor) startYtdlpFFmpegPipeline(url string, urlLogger AudioL
 
 	urlLogger.Info("yt-dlp | ffmpeg pipeline started successfully", contextFields)
 
-	// Give the pipeline a moment to initialize
-	time.Sleep(100 * time.Millisecond)
+	// Wait for FFmpeg to produce output or timeout
+	ffmpegStdout, err = fp.waitForOutput(ffmpegStdout, urlLogger, contextFields)
+	if err != nil {
+		return nil, err
+	}
+	fp.outputPipe = ffmpegStdout
 
 	return ffmpegStdout, nil
+}
+
+// waitForOutput waits until the given pipe produces data or the start timeout elapses
+func (fp *FFmpegProcessor) waitForOutput(pipe io.ReadCloser, logger AudioLogger, contextFields map[string]interface{}) (io.ReadCloser, error) {
+	timeout := fp.streamingConfig.StartTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ready := make(chan error, 1)
+	bufReader := bufio.NewReader(pipe)
+	go func() {
+		_, err := bufReader.Peek(1)
+		ready <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		pipe.Close()
+		fp.stopInternal()
+		logger.Warn("Timed out waiting for FFmpeg output", contextFields)
+		return nil, fmt.Errorf("ffmpeg start timeout: %w", ctx.Err())
+	case err := <-ready:
+		if err != nil {
+			pipe.Close()
+			fp.stopInternal()
+			logger.Error("Failed reading FFmpeg output", err, contextFields)
+			return nil, fmt.Errorf("ffmpeg output error: %w", err)
+		}
+	}
+
+	return struct {
+		io.Reader
+		io.Closer
+	}{bufReader, pipe}, nil
 }
 
 // buildYtdlpArgs constructs the yt-dlp command arguments for piping
